@@ -401,7 +401,7 @@ class TritonAttentionImpl(AttentionImpl):
 
             self.unified_attention(
                 q=query[:num_actual_tokens],
-                k=key_cache,
+                k=key_cache, # torch.Size([36500, 16, 8, 128])
                 v=value_cache,
                 out=output[:num_actual_tokens],
                 cu_seqlens_q=cu_seqlens_q,

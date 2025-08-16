@@ -23,6 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
+import os
 from typing import Any, Optional, Union
 
 import torch
@@ -133,6 +134,7 @@ class Qwen3Attention(nn.Module):
                 "layer_idx": extract_layer_index(prefix),
                 "dual_chunk_attention_config": dual_chunk_attention_config,
             } if dual_chunk_attention_config else {},
+            rope=self.rotary_emb,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -153,8 +155,11 @@ class Qwen3Attention(nn.Module):
                            self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        if os.environ.get("SW"):
+            attn_output = self.attn(q, k, v, pos=positions)
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -303,6 +308,12 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        
+        ### TMP
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained("/data/niklas/s2/Qwen3-1.7B")
+        self.txt = ""
+        self.toks = 0
 
     def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
         self.model.aux_hidden_state_layers = layers
@@ -321,6 +332,18 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        # import pdb; pdb.set_trace()
+        # if len(input_ids.shape) > 1:
+        # self.txt += self.tokenizer.decode(input_ids)
+        #self.toks += input_ids.shape[0]
+        #if self.toks % 1000 == 0:
+        #    print(f"Processed {self.toks} tokens so far.")
+        # print("-"*20)
+        # print(self.txt)
+        # print("-"*20)
+        # NOTE(niklas): input_ids is of shape ~(bs*seq_len,) i.e. batches concatenated
+        # if duplicate prompt, positions is sth like:
+        # [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 16, 17, 18, 19, 20, 21, 22]
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states

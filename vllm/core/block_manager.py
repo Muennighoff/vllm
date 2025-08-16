@@ -76,6 +76,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         # max_block_sliding_window is the max number of blocks that need to be
         # allocated
         self.max_block_sliding_window = None
+        ### TODO(niklas)
         if sliding_window is not None:
             # +1 here because // rounds down
             num_blocks = sliding_window // block_size + 1
