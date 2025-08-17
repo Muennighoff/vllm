@@ -568,17 +568,19 @@ class FlashAttentionImpl(AttentionImpl):
 
             if os.environ.get("SW"):
                 # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
-                num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
-                flat_k_cache = key_cache.reshape(num_blocks * block_size, num_kv_heads, head_size)
-                flat_v_cache = value_cache.reshape(num_blocks * block_size, num_kv_heads, head_size)
+                # num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
+                flat_k_cache = key_cache.reshape(-1, num_kv_heads, head_size)
+                flat_v_cache = value_cache.reshape(-1, num_kv_heads, head_size)
                 # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
                 k_compact = flat_k_cache.index_select(0, gather_index).contiguous()   # (total_k, n_kv, d)
                 v_compact = flat_v_cache.index_select(0, gather_index).contiguous()
-                try:
-                    q = self.rope(pos, query[:num_actual_tokens])[0]
-                    k_compact = self.rope(k_pos, k_compact)[0]
-                except:
-                    import pdb; pdb.set_trace()  # Check if we are in sliding window mode
+                # The below does not really speed things up
+                # got input: 16.97 toks/s vs 15.61 toks/s with above
+                #k_compact = flat_k_cache[gather_index]
+                #v_compact = flat_v_cache[gather_index]
+
+                q = self.rope(pos[:num_actual_tokens], query[:num_actual_tokens])[0]
+                k_compact = self.rope(k_pos, k_compact)[0]                
 
                 flash_attn_varlen_func(
                     q=q,

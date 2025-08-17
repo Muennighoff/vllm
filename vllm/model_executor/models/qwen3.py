@@ -393,8 +393,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             # For first-pass detection: store per-sequence prompt slots on self.prompt_slots (list of tensors)
             is_first_pass = (not hasattr(self, "prompt_slots")) or (max_seqlen_q > 1)
             device = positions.device
-            # block_size_arange = torch.arange(block_size, device=device, dtype=torch.long).unsqueeze(0) # (block_size,)
-            block_size_arange = torch.arange(block_size, dtype=torch.int32, device=device).unsqueeze(0)
+            block_size_arange = torch.arange(block_size, dtype=torch.long, device=device).unsqueeze(0)
 
             for b in range(B):
                 if (L := int(seq_lens[b])) <= 0:
@@ -446,6 +445,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 chosen_per_seq.append(chosen)
 
             gather_index = torch.cat(chosen_per_seq, dim=0)
+            # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
             cu = [0] + list(itertools.accumulate(lengths))
             cu_seqlens_k = torch.tensor(cu, dtype=torch.int32, device=device)
             max_seqlen_k = torch.tensor(max(lengths), dtype=torch.int32, device=device)
