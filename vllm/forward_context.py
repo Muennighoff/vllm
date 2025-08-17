@@ -153,6 +153,7 @@ class ForwardContext:
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
     skip_cuda_graphs: bool = False
+    block_size: Optional[int] = None  ### Muennighoff
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -199,6 +200,7 @@ def set_forward_context(
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         skip_cuda_graphs=skip_cuda_graphs,
+        block_size=vllm_config.cache_config.block_size, ### Muennighoff
     )
 
     try:

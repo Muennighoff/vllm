@@ -439,6 +439,10 @@ class FlashAttentionImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         pos: Optional[torch.Tensor] = None,
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -537,10 +541,11 @@ class FlashAttentionImpl(AttentionImpl):
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
-            seqused_k = attn_metadata.seq_lens
+            # seqused_k = attn_metadata.seq_lens
             max_seqlen_q = attn_metadata.max_query_len
-            max_seqlen_k = attn_metadata.max_seq_len
-            block_table = attn_metadata.block_table
+            # max_seqlen_k = attn_metadata.max_seq_len
+            # block_table = attn_metadata.block_table
+
             # NOTE(niklas): block_table indexes into the key/value cache specifically
             # it is of shape [bs, x] where x is e.g. 2560
             # for each batch element it has indices where its caches are stored in the key/value cache
@@ -552,7 +557,7 @@ class FlashAttentionImpl(AttentionImpl):
             # (also in third as vLLM only allows prompt sharing in increments of ~16
             # since the prompt is 23 tokens, another 7 are in block 3 (despite also being in block 2)
             # i.e. (key_cache[2] == key_cache[3]).all() == True
-            scheduler_metadata = attn_metadata.scheduler_metadata
+            # scheduler_metadata = attn_metadata.scheduler_metadata
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
             #if layer.layer_name == "model.layers.0.self_attn.attn":
@@ -561,9 +566,49 @@ class FlashAttentionImpl(AttentionImpl):
                 # import pdb; pdb.set_trace() # Check where keys get appended to cache/stored
                 # print(cu_seqlens_q, max_seqlen_q, seqused_k, max_seqlen_k, self.sliding_window, (key_cache != 0).sum())
 
+            if os.environ.get("SW"):
+                # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
+                num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
+                flat_k_cache = key_cache.reshape(num_blocks * block_size, num_kv_heads, head_size)
+                flat_v_cache = value_cache.reshape(num_blocks * block_size, num_kv_heads, head_size)
+                # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
+                k_compact = flat_k_cache.index_select(0, gather_index).contiguous()   # (total_k, n_kv, d)
+                v_compact = flat_v_cache.index_select(0, gather_index).contiguous()
+                try:
+                    q = self.rope(pos, query[:num_actual_tokens])[0]
+                    k_compact = self.rope(k_pos, k_compact)[0]
+                except:
+                    import pdb; pdb.set_trace()  # Check if we are in sliding window mode
+
+                flash_attn_varlen_func(
+                    q=q,
+                    k=k_compact,
+                    v=v_compact,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    cu_seqlens_k=cu_seqlens_k,     # varlen path
+                    seqused_k=None,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=attn_metadata.causal,
+                    alibi_slopes=None,             # FA3 requires None
+                    window_size=(-1, -1),          # we preselected keys
+                    block_table=None,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=None,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    num_splits=attn_metadata.max_num_splits,
+                    s_aux=self.sinks,
+                )
+
             # === Config ===
             # sliding window: number of left tokens to keep from the tail (env overrides)
-            if (sw := os.environ.get("SW")):
+            elif (sw := os.environ.get("SW")):
+                # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
                 sw = int(sw)
 
                 # Prompt tokens to keep if provided via env; otherwise keep full prompt on first pass
