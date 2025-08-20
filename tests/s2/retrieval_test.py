@@ -14,18 +14,18 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
 from vllm_triton_hook import install_triton_prompt_sink_patch
 install_triton_prompt_sink_patch()
 
-MODEL = "Qwen/Qwen3-1.7B"
+MODEL = "Qwen/Qwen3-8B"
 PRIME = "806917567"
 
 def build_prompt(tokenizer: PreTrainedTokenizer) -> str:
     # A prompt that forces long thinking then asks for the prime at the end.
     user_msg = (
+        f"The special number in this prompt is 23.\n"
         f"You will think step-by-step for a while before answering.\n"
-        f"The important prime number in this prompt is {PRIME}.\n"
         f"Rules:\n"
-        f"1) First, write a long chain-of-thought (at least ~900 tokens).\n"
-        f"2) At the very end, after the chain-of-thought, answer this question exactly:\n"
-        f"   What is the prime number mentioned earlier? Output only the digits.\n"
+        f"1. Write a long chain-of-thought to solve the question.\n"
+        f"2. Do not include the special number anywhere in your chain of thought.\n"
+        f"The question is: Prime factorize 806917567.\n"
     )
     messages = [
         {"role": "user", "content": user_msg}
@@ -57,6 +57,17 @@ def main():
         # otherwise it’s enforced by our patch reading VLLM_SLIDING_WINDOW
     )
 
+    outputs = llm.generate(prompt, sampling_params=s)
+    text_out = outputs[0].outputs[0].text
+    prompt = prompt + text_out + "\n\nWhat is the special number mentioned earlier? Output in format <SPECIAL>: {special number}.\n\n"
+    print(prompt)
+    s = SamplingParams(
+        temperature=0.0,     # deterministic to simplify checking
+        top_p=1.0,
+        max_tokens=100,     # long decode
+        # if your vLLM build surfaces sliding window via SamplingParams, add it there;
+        # otherwise it’s enforced by our patch reading VLLM_SLIDING_WINDOW
+    )
     outputs = llm.generate(prompt, sampling_params=s)
     text_out = outputs[0].outputs[0].text
     ids = outputs[0].outputs[0].token_ids
