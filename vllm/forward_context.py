@@ -44,7 +44,7 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
-
+    block_size: Optional[int] = None ### Muennighoff
 
 _forward_context: Optional[ForwardContext] = None
 
@@ -101,7 +101,9 @@ def set_forward_context(attn_metadata: Any,
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        dp_metadata=dp_metadata)
+        dp_metadata=dp_metadata,
+        block_size=vllm_config.cache_config.block_size, ### Muennighoff
+)
 
     # KVConnector: trigger (possibly async) load before forward.
     # Each attn layer will block until the reading is complete.
