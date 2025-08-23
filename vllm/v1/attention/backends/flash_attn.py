@@ -541,7 +541,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
-            # seqused_k = attn_metadata.seq_lens
+            seqused_k = attn_metadata.seq_lens
             max_seqlen_q = attn_metadata.max_query_len
             # max_seqlen_k = attn_metadata.max_seq_len
             # block_table = attn_metadata.block_table
@@ -557,7 +557,6 @@ class FlashAttentionImpl(AttentionImpl):
             # (also in third as vLLM only allows prompt sharing in increments of ~16
             # since the prompt is 23 tokens, another 7 are in block 3 (despite also being in block 2)
             # i.e. (key_cache[2] == key_cache[3]).all() == True
-            # scheduler_metadata = attn_metadata.scheduler_metadata
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
             #if layer.layer_name == "model.layers.0.self_attn.attn":
@@ -566,9 +565,9 @@ class FlashAttentionImpl(AttentionImpl):
                 # import pdb; pdb.set_trace() # Check where keys get appended to cache/stored
                 # print(cu_seqlens_q, max_seqlen_q, seqused_k, max_seqlen_k, self.sliding_window, (key_cache != 0).sum())
 
-            if os.environ.get("SW"):
+            if os.environ.get("SW"):# and seqused_k.max() > int(os.environ.get("SW"))): # TODO: Skip if <2048
                 # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
-                # num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
+                num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
                 flat_k_cache = key_cache.reshape(-1, num_kv_heads, head_size)
                 flat_v_cache = value_cache.reshape(-1, num_kv_heads, head_size)
                 # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
@@ -580,7 +579,7 @@ class FlashAttentionImpl(AttentionImpl):
                 #v_compact = flat_v_cache[gather_index]
 
                 q = self.rope(pos[:num_actual_tokens], query[:num_actual_tokens])[0]
-                k_compact = self.rope(k_pos, k_compact)[0]                
+                k_compact = self.rope(k_pos, k_compact)[0]
 
                 flash_attn_varlen_func(
                     q=q,
@@ -606,193 +605,6 @@ class FlashAttentionImpl(AttentionImpl):
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
                 )
-
-            # === Config ===
-            # sliding window: number of left tokens to keep from the tail (env overrides)
-            elif (sw := os.environ.get("SW")):
-                # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
-                sw = int(sw)
-
-                # Prompt tokens to keep if provided via env; otherwise keep full prompt on first pass
-                prompt_toks_env = os.environ.get("PROMPTTOKS")
-                prompt_toks_env = int(prompt_toks_env) if prompt_toks_env is not None else None
-
-                # === Flatten paged KV cache to slot-major rows ===
-                num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
-                flat_k_cache = key_cache.reshape(num_blocks * block_size, num_kv_heads, head_size)
-                flat_v_cache = value_cache.reshape(num_blocks * block_size, num_kv_heads, head_size)
-
-                # === Metadata / containers ===
-                seq_lens = attn_metadata.seq_lens
-                B = seq_lens.shape[0]
-                chosen_per_seq = []   # list of 1-D long tensors (slot indices) per sequence in batch
-                lengths = []          # lengths per sequence
-                # For first-pass detection: store per-sequence prompt slots on self.prompt_slots (list of tensors)
-                is_first_pass = (not hasattr(self, "prompt_slots")) or (max_seqlen_q > 1)
-                device = flat_k_cache.device
-                block_size_arange = torch.arange(block_size, device=device, dtype=torch.long).unsqueeze(0) # (block_size,)
-
-                for b in range(B):
-                    if (L := int(seq_lens[b])) <= 0:
-                        print("WARNING: Sequence length is 0 for batch element", b)
-                        chosen_per_seq.append(torch.empty(0, dtype=torch.long, device=device))
-                        lengths.append(0)
-                        continue
-
-                    if (num_blocks_used := (L + block_size - 1) // block_size) == 0:
-                        print("WARNING: No blocks used for sequence", b)
-                        slots_b = torch.empty(0, dtype=torch.long, device=device)
-                    else:
-                        # slice first num_blocks_used block ids
-                        block_ids = block_table[b, :num_blocks_used]  # (num_blocks_used,)
-                        # compute base indices for each block: (num_blocks_used, 1)
-                        # & expand with arange: (num_blocks_used, block_size)
-                        # then reshape into a flat list of slots & take exactly L of them
-                        slots_b = ((block_ids * block_size).unsqueeze(1) + block_size_arange).reshape(-1)[:L]
-                    
-                    # === Decide what to keep for this sequence: prompt (first pass) or stored prompt + window (later) ===
-                    if is_first_pass:
-                        # Take prompt_end = PROMPTTOKS + 1 if provided, else full prompt length L
-                        prompt_end = prompt_toks_env + 1 if prompt_toks_env is not None else L
-                        prompt_end = min(prompt_end, L)
-                        # prefix = first prompt_end tokens
-                        prefix = slots_b[:prompt_end]
-                        chosen = torch.cat([prefix, slots_b[prompt_end:][-sw:]], dim=0)
-                        # store the prompt prefix for future calls (one entry per batch element)
-                        if (not hasattr(self, "prompt_slots")) or (B > len(self.prompt_slots)):
-                            self.prompt_slots = [None] * B
-                        self.prompt_slots[b] = prefix.detach().clone()
-                    else:
-                        # Subsequent passes: reuse stored prefix for this sequence (if any)
-                        if hasattr(self, "prompt_slots") and self.prompt_slots is not None:
-                            prefix = self.prompt_slots[b]
-                        else:
-                            print("WARNING: No stored prefix for sequence", b, "falling back to no prefix")
-                            # Fall back to keeping nothing of the prefix (unlikely)
-                            prefix = torch.empty(0, dtype=torch.long, device=device)
-
-                        tail = slots_b[-sw:]
-                        chosen = torch.cat([prefix, tail[~torch.isin(tail, prefix)]], dim=0)
-
-                    lengths.append(int(chosen.numel()))
-                    # If chosen ended up empty but the sequence has tokens, ensure we keep at least the last token
-                    if lengths[-1] == 0 and slots_b.numel() > 0:
-                        print("WARNING: Chosen tokens is empty for sequence", b, "falling back to last token")
-                        chosen = slots_b[-1:].clone()
-                    chosen_per_seq.append(chosen)
-
-                # === Build compact varlen K/V: concatenate chosen rows and form cu_seqlens_k ===
-                # gather_index is total_k long
-                gather_index = torch.cat(chosen_per_seq, dim=0)    # 1D long tensor
-                k_compact = flat_k_cache.index_select(0, gather_index).contiguous()   # (total_k, n_kv, d)
-                v_compact = flat_v_cache.index_select(0, gather_index).contiguous()
-
-                # Build cu_seqlens_k from lengths (int32)
-                cu = [0] + list(itertools.accumulate(lengths))
-                cu_seqlens_k = torch.tensor(cu, dtype=torch.int32, device=flat_k_cache.device)
-                max_seqlen_k = max(lengths)
-
-                # Apply RoPE
-                if max_seqlen_q == 1: # Clamp pos to avoid growing larger than full window
-                    pos = torch.tensor(lengths).to(device) - 1
-                q = self.rope(pos, query[:num_actual_tokens])[0]
-                k_pos = torch.cat([torch.arange(l) for l in lengths])
-                k_compact = self.rope(k_pos.to(device), k_compact)[0]
-
-                # === Call FA3 in varlen mode (we disable kernel SW; FA3 needs alibi=None) ===
-                flash_attn_varlen_func(
-                    q=q,
-                    k=k_compact,
-                    v=v_compact,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=attn_metadata.query_start_loc,
-                    max_seqlen_q=max_seqlen_q,
-                    cu_seqlens_k=cu_seqlens_k,     # varlen path
-                    seqused_k=None,
-                    max_seqlen_k=max_seqlen_k,
-                    softmax_scale=self.scale,
-                    causal=attn_metadata.causal,
-                    alibi_slopes=None,             # FA3 requires None
-                    window_size=(-1, -1),          # we preselected keys
-                    block_table=None,
-                    softcap=self.logits_soft_cap,
-                    scheduler_metadata=None,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=layer._q_scale.expand(descale_shape),
-                    k_descale=layer._k_scale.expand(descale_shape),
-                    v_descale=layer._v_scale.expand(descale_shape),
-                    num_splits=attn_metadata.max_num_splits,
-                    s_aux=self.sinks,
-                )
-
-            # # Store kv cache of prompt on first pass
-            # if (sliding_window := os.environ.get("SLIDING_WINDOW")) is not None:
-            #     sliding_window = int(sliding_window)
-            #     if (self.prompt_keys is None) or (max_seqlen_q > 1):
-            #         promptidx = int(os.environ.get("PROMPTTOKS", attn_metadata.slot_mapping.shape[0])) - 1
-            #         # If prompt is longer than sliding window:
-            #         # RuntimeError: k must have shape (batch_size_k, seqlen_k, num_heads_k, head_size)
-            #         # Below handles this via a promptidx to pay attention to all before it & last sliding window at the end
-            #         slots = torch.cat(
-            #             (attn_metadata.slot_mapping[:promptidx + 1], attn_metadata.slot_mapping[promptidx + 1:][-sliding_window:]),
-            #             dim=0
-            #         )
-            #         flat_k_cache = flat_k_cache[slots].unsqueeze(0)
-            #         flat_v_cache = flat_v_cache[slots].unsqueeze(0)
-
-            #         try:
-            #             self.prompt_keys = flat_k_cache[:,:slots[promptidx].item() + 1].clone()
-            #         except:
-            #             if layer.layer_name == "model.layers.0.self_attn.attn":
-            #                 import pdb; pdb.set_trace() # Check if we are in sliding window mode
-            #         self.prompt_values = flat_v_cache[:,:slots[promptidx].item() + 1].clone()
-            #         self.prompt_slot_end = slots[promptidx].item()
-            #     else:
-            #         cur_slot = attn_metadata.slot_mapping.item()
-            #         window_start = max(0, cur_slot - sliding_window)
-            #         slots = torch.arange(
-            #             max(self.prompt_slot_end, window_start) + 1, cur_slot + 1,
-            #             device=attn_metadata.slot_mapping.device
-            #         )
-            #         flat_k_cache = torch.cat((self.prompt_keys, flat_k_cache[slots].unsqueeze(0)), dim=1)
-            #         flat_v_cache = torch.cat((self.prompt_values, flat_v_cache[slots].unsqueeze(0)), dim=1)
-
-            #     max_seqlen_k = flat_k_cache.shape[1]
-
-            # # NOTE(niklas) in flash_attn block -> page
-            # # https://github.com/Dao-AILab/flash-attention/blob/a1c2e22817960fd68933d46747db39d930ac2c8f/flash_attn/cute/interface.py#L102C32-L102C52
-            
-            # # Options for passing (https://github.com/Dao-AILab/flash-attention/blob/a1c2e22817960fd68933d46747db39d930ac2c8f/flash_attn/cute/interface.py#L97):
-            # # 1) Blocks / Pages (default)
-            # # key_cache = torch.Size([36500, 16, 8, 128])
-            # # 2) Batches (vanilla attention e.g. in transformers etc)
-            # # key_cache = (batch_size, seqlen_k, num_head_kv, head_dim)
-            # # 3) Varlen (requires cu_seqlens_k)
-            # # key_cache = (seqlen_k, num_head_kv, head_dim)
-            # flash_attn_varlen_func(
-            #     q=query[:num_actual_tokens],
-            #     k=flat_k_cache, # key_cache, # torch.Size([36500, 16, 8, 128]) # num_blocks, block_size, num_kv_heads, head_size
-            #     # Can also pass as (batch_size, seqlen_k, num_head_kv, head_dim)
-            #     v=flat_v_cache, # value_cache, # torch.Size([36500, 16, 8, 128])
-            #     out=output[:num_actual_tokens],
-            #     cu_seqlens_q=cu_seqlens_q,
-            #     max_seqlen_q=max_seqlen_q,
-            #     seqused_k=None, # seqused_k,
-            #     max_seqlen_k=max_seqlen_k,
-            #     softmax_scale=self.scale,
-            #     causal=attn_metadata.causal,
-            #     alibi_slopes=self.alibi_slopes,
-            #     window_size=(-1, -1), # self.sliding_window, # (3, 0)
-            #     block_table=None, # block_table, # torch.Size([1, 2560]); [1, 2, 0, 0 ... 0]
-            #     softcap=self.logits_soft_cap,
-            #     scheduler_metadata=None, # scheduler_metadata,
-            #     fa_version=self.vllm_flash_attn_version,
-            #     q_descale=layer._q_scale.expand(descale_shape),
-            #     k_descale=layer._k_scale.expand(descale_shape),
-            #     v_descale=layer._v_scale.expand(descale_shape),
-            #     num_splits=attn_metadata.max_num_splits,
-            #     s_aux=self.sinks,
-            # )
             else:
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
@@ -802,14 +614,14 @@ class FlashAttentionImpl(AttentionImpl):
                     cu_seqlens_q=cu_seqlens_q,
                     max_seqlen_q=max_seqlen_q,
                     seqused_k=seqused_k,
-                    max_seqlen_k=max_seqlen_k,
+                    max_seqlen_k=attn_metadata.max_seq_len,
                     softmax_scale=self.scale,
                     causal=attn_metadata.causal,
                     alibi_slopes=self.alibi_slopes,
                     window_size=self.sliding_window,
-                    block_table=block_table,
+                    block_table=attn_metadata.block_table,
                     softcap=self.logits_soft_cap,
-                    scheduler_metadata=scheduler_metadata,
+                    scheduler_metadata=attn_metadata.scheduler_metadata,
                     fa_version=self.vllm_flash_attn_version,
                     q_descale=layer._q_scale.expand(descale_shape),
                     k_descale=layer._k_scale.expand(descale_shape),
