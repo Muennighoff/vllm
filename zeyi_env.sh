@@ -1,4 +1,4 @@
-cd /mnt/ddn/t-zeyichen/vllm
+cd vllm
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 uv venv --python=python3.12 .vllm_venv

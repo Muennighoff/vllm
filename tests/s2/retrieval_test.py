@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 # --- enable the Triton prompt-sink path
 os.environ["VLLM_USE_TRITON_PROMPT_SINK"] = "1"
 os.environ["VLLM_SLIDING_WINDOW"] = "128"
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
 
 # install monkey-patch
 from vllm_triton_hook import install_triton_prompt_sink_patch
