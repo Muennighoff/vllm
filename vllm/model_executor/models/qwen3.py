@@ -163,6 +163,8 @@ class Qwen3Attention(nn.Module):
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
         if os.environ.get("SW"):
+            if os.environ.get("SW_regular_rope"):
+                q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(
                 q,
                 k,
@@ -336,11 +338,16 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
         
-        ### TMP
-        from transformers import AutoTokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained("/data/niklas/s2/Qwen3-1.7B")
-        self.txt = ""
-        self.toks = 0
+        # Debug
+        # from transformers import AutoTokenizer
+        # self.tokenizer = AutoTokenizer.from_pretrained("/data/niklas/s2/Qwen3-1.7B")
+        # self.txt = ""
+        # self.toks = 0
+        if (sw := os.environ.get("SW")):
+            self.sw = int(sw)
+            print(f"Using sliding window with size {self.sw}")
+        else:
+            self.sw = None
 
     def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
         self.model.aux_hidden_state_layers = layers
@@ -359,10 +366,10 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # import pdb; pdb.set_trace()
+        # Debug
         # if len(input_ids.shape) > 1:
         # self.txt += self.tokenizer.decode(input_ids)
-        #self.toks += input_ids.shape[0]
+        # self.toks += input_ids.shape[0]
         #if self.toks % 1000 == 0:
         #    print(f"Processed {self.toks} tokens so far.")
         # print("-"*20)
@@ -371,9 +378,8 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # NOTE(niklas): input_ids is of shape ~(bs*seq_len,) i.e. batches concatenated
         # if duplicate prompt, positions is sth like:
         # [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 16, 17, 18, 19, 20, 21, 22]
-        if (sw := os.environ.get("SW")) and ((forward_context := get_forward_context()).attn_metadata is not None):
-            # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
-            sw = int(sw)
+        if self.sw and ((forward_context := get_forward_context()).attn_metadata is not None):
+            # import pdb; pdb.set_trace()
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = next(iter(attn_metadata.values()))
@@ -420,7 +426,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     prompt_end = min(prompt_end, L)
                     # prefix = first prompt_end tokens
                     prefix = slots_b[:prompt_end]
-                    chosen = torch.cat([prefix, slots_b[prompt_end:][-sw:]], dim=0)
+                    chosen = torch.cat([prefix, slots_b[prompt_end:][-self.sw:]], dim=0)
                     # store the prompt prefix for future calls (one entry per batch element)
                     if (not hasattr(self, "prompt_slots")) or (B > len(self.prompt_slots)):
                         self.prompt_slots = [None] * B
@@ -434,7 +440,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                         # Fall back to keeping nothing of the prefix (unlikely)
                         prefix = torch.empty(0, dtype=torch.long, device=device)
 
-                    tail = slots_b[-sw:]
+                    tail = slots_b[-self.sw:]
                     chosen = torch.cat([prefix, tail[~torch.isin(tail, prefix)]], dim=0)
 
                 lengths.append(int(chosen.numel()))

@@ -3,7 +3,7 @@
 """Attention layer with FlashAttention."""
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
@@ -370,6 +370,7 @@ class FlexAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
+        rope: Optional[Any] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -428,6 +429,11 @@ class FlexAttentionImpl(AttentionImpl):
         attn_metadata: FlexAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        pos: Optional[torch.Tensor] = None,
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FLexAttention.
 

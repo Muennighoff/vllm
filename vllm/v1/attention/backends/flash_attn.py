@@ -577,9 +577,11 @@ class FlashAttentionImpl(AttentionImpl):
                 # got input: 16.97 toks/s vs 15.61 toks/s with above
                 #k_compact = flat_k_cache[gather_index]
                 #v_compact = flat_v_cache[gather_index]
-
-                q = self.rope(pos[:num_actual_tokens], query[:num_actual_tokens])[0]
-                k_compact = self.rope(k_pos, k_compact)[0]
+                if not (os.environ.get("SW_regular_rope")):
+                    q = self.rope(pos[:num_actual_tokens], query[:num_actual_tokens])[0]
+                    k_compact = self.rope(k_pos, k_compact)[0]
+                else:
+                    q = query[:num_actual_tokens]
 
                 flash_attn_varlen_func(
                     q=q,
