@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
+    SW: bool = False
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
@@ -336,6 +337,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda:
     (os.getenv("VLLM_USE_AITER_UNIFIED_ATTENTION", "False").lower() in
      ("true", "1")),
+    # Enable prompt sink + sliding window when SW=1
+    "SW":
+    lambda: os.getenv("SW", "0") == "1",
 
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
     # when using the flash-attention backend.

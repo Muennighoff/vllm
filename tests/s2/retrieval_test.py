@@ -6,13 +6,17 @@ from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 # --- enable the Triton prompt-sink path
-os.environ["VLLM_USE_TRITON_PROMPT_SINK"] = "1"
-os.environ["VLLM_SLIDING_WINDOW"] = "128"
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
+# os.environ["VLLM_USE_TRITON_PROMPT_SINK"] = "1"
+# os.environ["VLLM_SLIDING_WINDOW"] = "128"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
+
+os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "1"
+os.environ["VLLM_USE_V1"] = "1"
+os.environ["VLLM_ATTENTION_BACKEND"] = "TRITON_ATTN_VLLM_V1"
 
 # install monkey-patch
 from vllm_triton_hook import install_triton_prompt_sink_patch
-install_triton_prompt_sink_patch()
+# install_triton_prompt_sink_patch()
 
 MODEL = "Qwen/Qwen3-8B"
 PRIME = "806917567"
