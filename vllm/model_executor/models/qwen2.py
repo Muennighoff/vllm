@@ -341,6 +341,10 @@ class Qwen2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -358,7 +362,13 @@ class Qwen2Model(nn.Module):
                 self.layers[self.start_layer:self.end_layer]):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual,
+                k_pos=k_pos,
+                gather_index=gather_index,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_k=max_seqlen_k,
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({

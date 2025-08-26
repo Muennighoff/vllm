@@ -652,7 +652,7 @@ def unified_attention(
     qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
-    prompt_idx=None,
+    # prompt_idx=None,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -736,6 +736,7 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
+            # prompt_idx=prompt_idx,
         )
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
