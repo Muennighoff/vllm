@@ -2,13 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-<<<<<<< HEAD
 import itertools
 import os
 from typing import Any,ClassVar, Optional
-=======
-from typing import Optional
->>>>>>> main
 
 import numpy as np
 import torch
