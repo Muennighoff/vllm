@@ -139,6 +139,9 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     causal: bool = True
+    
+    # For sliding window with global tokens
+    global_token_lens: Optional[torch.Tensor] = None  # Number of global tokens per sequence
 
 
 def _get_sliding_window_configs(
@@ -331,6 +334,32 @@ class FlashAttentionMetadataBuilder(
             # we only set num_splits when using cuda graphs.
             max_num_splits = self.max_num_splits
 
+        # Detect global token lengths for sliding window with global tokens
+        global_token_lens = None
+        
+        # Detect if this is initial prompt processing: query_start_loc differences equal seq_lens
+        # This means we're processing the full sequence (prompt) for each request
+        is_initial_prompt = True
+        if num_reqs > 0:
+            for i in range(num_reqs):
+                start_idx = query_start_loc[i].item()
+                end_idx = query_start_loc[i + 1].item()
+                query_len_for_seq = end_idx - start_idx
+                seq_len_for_seq = seq_lens_cpu[i].item()
+                if query_len_for_seq != seq_len_for_seq:
+                    is_initial_prompt = False
+                    break
+        else:
+            is_initial_prompt = False
+            
+        if is_initial_prompt:
+            # This is the initial prompt pass - record actual prompt lengths
+            # for sliding window extension (not block-aligned like in block manager)
+            global_token_lens = seq_lens_cpu[:num_reqs].clone()
+        elif hasattr(common_attn_metadata, 'global_token_lens') and common_attn_metadata.global_token_lens is not None:
+            # Use existing global token lengths from previous passes
+            global_token_lens = common_attn_metadata.global_token_lens
+
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -347,7 +376,8 @@ class FlashAttentionMetadataBuilder(
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
-            causal=causal)
+            causal=causal,
+            global_token_lens=global_token_lens)
         return attn_metadata
 
     def can_run_in_cudagraph(
@@ -522,6 +552,20 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
+            # Adjust sliding window to preserve global tokens
+            effective_sliding_window = self.sliding_window
+            if (self.sliding_window != (-1, -1) and 
+                attn_metadata.global_token_lens is not None):
+                # For sliding window with global tokens, extend the sliding window
+                # to always include all global tokens
+                max_global_len = int(attn_metadata.global_token_lens.max().item())
+                if max_global_len > 0:
+                    window_left, window_right = self.sliding_window
+                    if window_left > 0:
+                        # Ensure sliding window is large enough to reach all global tokens
+                        effective_window_left = max(window_left, max_global_len + window_left)
+                        effective_sliding_window = (effective_window_left, window_right)
+
             flash_attn_varlen_func(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -534,7 +578,7 @@ class FlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,
                 alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
+                window_size=effective_sliding_window,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
                 scheduler_metadata=scheduler_metadata,
@@ -573,6 +617,7 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=layer._v_scale,
         )
         return output
+
 
     def _forward_encoder_attention(
         self,

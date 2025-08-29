@@ -183,6 +183,9 @@ class SequenceData(msgspec.Struct,
 
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
+    
+    # For sliding window with global tokens - tracks the number of global tokens (prompt length)
+    _global_token_len: Optional[int] = None
 
     @staticmethod
     def from_prompt_token_counts(
@@ -318,6 +321,14 @@ class SequenceData(msgspec.Struct,
     @mrope_position_delta.setter
     def mrope_position_delta(self, new_mrope_position_delta):
         self._mrope_position_delta = new_mrope_position_delta
+
+    @property
+    def global_token_len(self) -> Optional[int]:
+        return self._global_token_len
+
+    @global_token_len.setter
+    def global_token_len(self, new_global_token_len: Optional[int]):
+        self._global_token_len = new_global_token_len
 
     def append_token_id(self,
                         token_id: int,

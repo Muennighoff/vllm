@@ -241,11 +241,30 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         block_table = self.block_tables[seq.seq_id]
 
+        # Extract or detect global token length for sliding window with global tokens
+        global_token_len = None
+        if hasattr(seq.data, 'global_token_len') and seq.data.global_token_len is not None:
+            global_token_len = seq.data.global_token_len
+        else:
+            # Detect if this is initial prompt processing and set global token length
+            num_computed_tokens = seq.data.get_num_computed_tokens()
+            total_tokens = seq.get_len()
+            
+            # If no tokens have been computed yet, this is the initial prompt processing
+            if num_computed_tokens == 0 and total_tokens > 0:
+                # This is the initial prompt - store the prompt length as global token length
+                prompt_len = seq.get_prompt_len()
+                # Align global token length to block boundaries to prevent generated tokens
+                # from being stuck in the same block as global tokens
+                global_token_len = ((prompt_len + self.block_size - 1) // self.block_size) * self.block_size
+                seq.data.global_token_len = global_token_len
+
         block_table.append_token_ids(
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
             extra_hash=seq.extra_hash(),
+            global_token_len=global_token_len,
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()

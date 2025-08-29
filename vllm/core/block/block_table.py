@@ -117,7 +117,8 @@ class BlockTable:
                          token_ids: List[int],
                          num_lookahead_slots: int = 0,
                          num_computed_slots: Optional[int] = None,
-                         extra_hash: Optional[int] = None) -> None:
+                         extra_hash: Optional[int] = None,
+                         global_token_len: Optional[int] = None) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -142,6 +143,9 @@ class BlockTable:
             extra_hash (Optional[int]): The hash value of additional
                 factors such as adapters that influence the block, apart
                 from the token_ids.
+            global_token_len (Optional[int]): The number of global tokens (prompt)
+                that should never be evicted from the sliding window. Used for
+                sliding window with global tokens preservation.
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0
@@ -150,9 +154,18 @@ class BlockTable:
         if self._max_block_sliding_window is not None:
             null_block = self._allocator.allocate_or_get_null_block()
             assert num_computed_slots is not None
+              
+            # Calculate how many blocks to evict, but preserve global token blocks
             end_block_idx = (num_computed_slots //
                              self._block_size) - self._max_block_sliding_window
-            for idx in range(0, end_block_idx):
+            
+            # Calculate start index for eviction (skip global token blocks)
+            start_evict_idx = 0
+            if global_token_len is not None and global_token_len > 0:
+                global_blocks_needed = (global_token_len + self._block_size - 1) // self._block_size
+                start_evict_idx = global_blocks_needed
+              
+            for idx in range(start_evict_idx, end_block_idx):
                 b = self._blocks[idx]
                 if b is not null_block:
                     self._allocator.free(b)
