@@ -229,7 +229,7 @@ class FlashAttentionMetadataBuilder(
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> FlashAttentionMetadata:
         """
-        fast_build disables AOT scheduling, used when there will be few 
+        fast_build disables AOT scheduling, used when there will be few
         iterations i.e. spec-decode
         """
         num_reqs = common_attn_metadata.num_reqs
@@ -509,13 +509,13 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            
+
             # NOTE(niklas): places the key and value tensors into the cache
             # i.e. key_cache.sum() == 0 before this on the first entry
             # & after key_cache.sum() == key.sum()
             # The func is implemented in a cuda kernel (void reshape_and_cache_flash())
             # It places it at the attn_metadata.slot_mapping locations as if the
-            # 1st dim comes first and has block_size many slots (2nd dim) and then moves to the 
+            # 1st dim comes first and has block_size many slots (2nd dim) and then moves to the
             # 2nd elemnt in 1st dim etc.
             # I.e. if slot_mapping is 16,17... and block_size is 16, then items are at
             # [1, 0], [1, 1], ... [2, 0] ...
@@ -583,11 +583,15 @@ class FlashAttentionImpl(AttentionImpl):
                 # got input: 16.97 toks/s vs 15.61 toks/s with above
                 #k_compact = flat_k_cache[gather_index]
                 #v_compact = flat_v_cache[gather_index]
-                if not (os.environ.get("SW_regular_rope")):
-                    q = self.rope(pos[:num_actual_tokens], query[:num_actual_tokens])[0]
-                    k_compact = self.rope(k_pos, k_compact)[0]
-                else:
-                    q = query[:num_actual_tokens]
+                ### Old code ###
+                # if not (os.environ.get("SW_regular_rope")):
+                #     q = self.rope(pos[:num_actual_tokens], query[:num_actual_tokens])[0]
+                #     k_compact = self.rope(k_pos, k_compact)[0]
+                # else:
+                #     q = query[:num_actual_tokens]
+                ### New code: Apply RoPE in FA ###
+                cos_sin = self.rope.cos_sin_cache.index_select(0, k_pos)
+                rotary_cos, rotary_sin = cos_sin.chunk(2, dim=-1)
 
                 flash_attn_varlen_func(
                     q=q,
@@ -612,6 +616,8 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=layer._v_scale.expand(descale_shape),
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
+                    rotary_cos=rotary_cos,
+                    rotary_sin=rotary_sin,
                 )
             else:
                 flash_attn_varlen_func(
