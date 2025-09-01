@@ -572,22 +572,23 @@ class FlashAttentionImpl(AttentionImpl):
                 # print(cu_seqlens_q, max_seqlen_q, seqused_k, max_seqlen_k, self.sliding_window, (key_cache != 0).sum())
 
             if os.environ.get("SW"):# and seqused_k.max() > int(os.environ.get("SW"))): # TODO: Skip if <2048
-                # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
                 num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
                 flat_k_cache = key_cache.reshape(-1, num_kv_heads, head_size)
                 flat_v_cache = value_cache.reshape(-1, num_kv_heads, head_size)
-                # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
                 k_compact = flat_k_cache.index_select(0, gather_index).contiguous()   # (total_k, n_kv, d)
                 v_compact = flat_v_cache.index_select(0, gather_index).contiguous()
                 # The below does not really speed things up
                 # got input: 16.97 toks/s vs 15.61 toks/s with above
                 #k_compact = flat_k_cache[gather_index]
                 #v_compact = flat_v_cache[gather_index]
-                if not (os.environ.get("SW_regular_rope")):
+                if (not(os.environ.get("SW_regular_rope"))) and (not(os.environ.get("NO_ROPE"))):
                     q = self.rope(pos[:num_actual_tokens], query[:num_actual_tokens])[0]
                     k_compact = self.rope(k_pos, k_compact)[0]
                 else:
                     q = query[:num_actual_tokens]
+
+                if layer.layer_name == "model.layers.0.self_attn.attn":
+                    import pdb; pdb.set_trace()
 
                 flash_attn_varlen_func(
                     q=q,
