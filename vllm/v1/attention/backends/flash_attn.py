@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+import itertools
+import os
+from typing import Any,ClassVar, Optional
 
 import numpy as np
 import torch
@@ -374,6 +376,7 @@ class FlashAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         sinks: Optional[torch.Tensor] = None,
+        rope: Optional[Any] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -418,6 +421,11 @@ class FlashAttentionImpl(AttentionImpl):
             assert self.sinks.shape[0] == num_heads, (
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer")
+            
+        self.prompt_slot_end = None
+        self.prompt_keys = None
+        self.prompt_values = None
+        self.rope = rope
 
     def forward(
         self,
@@ -429,6 +437,11 @@ class FlashAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        pos: Optional[torch.Tensor] = None,
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -520,31 +533,79 @@ class FlashAttentionImpl(AttentionImpl):
             block_table = attn_metadata.block_table
             scheduler_metadata = attn_metadata.scheduler_metadata
 
+            cu_seqlens_q = attn_metadata.query_start_loc
+            seqused_k = attn_metadata.seq_lens
+            max_seqlen_q = attn_metadata.max_query_len
+
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-            flash_attn_varlen_func(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=attn_metadata.causal,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                scheduler_metadata=scheduler_metadata,
-                fa_version=self.vllm_flash_attn_version,
-                q_descale=layer._q_scale.expand(descale_shape),
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-                num_splits=attn_metadata.max_num_splits,
-                s_aux=self.sinks,
-            )
+            if os.environ.get("SW"):# and seqused_k.max() > int(os.environ.get("SW"))): # TODO: Skip if <2048
+                # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
+                num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
+                flat_k_cache = key_cache.reshape(-1, num_kv_heads, head_size)
+                flat_v_cache = value_cache.reshape(-1, num_kv_heads, head_size)
+                # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
+                k_compact = flat_k_cache.index_select(0, gather_index).contiguous()   # (total_k, n_kv, d)
+                v_compact = flat_v_cache.index_select(0, gather_index).contiguous()
+                # The below does not really speed things up
+                # got input: 16.97 toks/s vs 15.61 toks/s with above
+                #k_compact = flat_k_cache[gather_index]
+                #v_compact = flat_v_cache[gather_index]
+                if not (os.environ.get("SW_regular_rope")):
+                    q = self.rope(pos[:num_actual_tokens], query[:num_actual_tokens])[0]
+                    k_compact = self.rope(k_pos, k_compact)[0]
+                else:
+                    q = query[:num_actual_tokens]
+
+                flash_attn_varlen_func(
+                    q=q,
+                    k=k_compact,
+                    v=v_compact,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    cu_seqlens_k=cu_seqlens_k,     # varlen path
+                    seqused_k=None,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=attn_metadata.causal,
+                    alibi_slopes=None,             # FA3 requires None
+                    window_size=(-1, -1),          # we preselected keys
+                    block_table=None,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=None,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    num_splits=attn_metadata.max_num_splits,
+                    s_aux=self.sinks,
+                )
+            else:
+
+                flash_attn_varlen_func(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=attn_metadata.causal,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=scheduler_metadata,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    num_splits=attn_metadata.max_num_splits,
+                    s_aux=self.sinks,
+                )
             return output
 
         # Cascade attention (rare case).

@@ -137,6 +137,9 @@ class Qwen3Attention(nn.Module):
                 "layer_idx": extract_layer_index(prefix),
                 "dual_chunk_attention_config": dual_chunk_attention_config,
             } if dual_chunk_attention_config else {},
+            **{
+                "rope": self.rotary_emb,
+            } if os.environ.get("SW") else {},
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -373,6 +376,9 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             is_first_pass = (not hasattr(self, "prompt_slots")) or (max_seqlen_q > 1)
             device = positions.device
             block_size_arange = torch.arange(block_size, dtype=torch.long, device=device).unsqueeze(0)
+            # print("="*60)
+            # print("I'm using Munninguehoff's code")
+            # print("="*60)
 
             for b in range(B):
                 if (L := int(seq_lens[b])) <= 0:
@@ -422,7 +428,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     print("WARNING: Chosen tokens is empty for sequence", b, "falling back to last token")
                     chosen = slots_b[-1:].clone()
                 chosen_per_seq.append(chosen)
-                import IPython; IPython.embed(); exit(1)
+                # import IPython; IPython.embed(); exit(1)
 
             gather_index = torch.cat(chosen_per_seq, dim=0)
             # import pdb; pdb.set_trace()  # Check if we are in sliding window mode

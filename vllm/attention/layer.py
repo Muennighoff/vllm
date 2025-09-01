@@ -3,6 +3,7 @@
 """Attention layer."""
 from typing import List, Optional
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -221,6 +222,11 @@ class Attention(nn.Module):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: Optional[torch.Size] = None,
+        pos: Optional[torch.Tensor] = None,
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -270,7 +276,9 @@ class Attention(nn.Module):
                                   output=output)
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                    query, key, value, output, self.layer_name,
+                    pos=pos,k_pos=k_pos, gather_index=gather_index,
+                    cu_seqlens_k=cu_seqlens_k, max_seqlen_k=max_seqlen_k)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -477,6 +485,11 @@ def unified_attention_with_output(
     output: torch.Tensor,
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
+    pos: Optional[torch.Tensor] = None,
+    k_pos: Optional[torch.Tensor] = None,
+    gather_index: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
+    max_seqlen_k: Optional[torch.Tensor] = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -492,7 +505,16 @@ def unified_attention_with_output(
                       kv_cache,
                       attn_metadata,
                       output=output,
-                      output_scale=output_scale)
+                      output_scale=output_scale,
+                      **{
+                        "pos": pos,
+                        "k_pos": k_pos,
+                        "gather_index": gather_index,
+                        "cu_seqlens_k": cu_seqlens_k,
+                        "max_seqlen_k": max_seqlen_k
+                      } if os.environ.get("SW") else {},
+                    )
+
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -504,6 +526,11 @@ def unified_attention_with_output_fake(
     output: torch.Tensor,
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
+    pos: Optional[torch.Tensor] = None,
+    k_pos: Optional[torch.Tensor] = None,
+    gather_index: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
+    max_seqlen_k: Optional[torch.Tensor] = None,
 ) -> None:
     return
 

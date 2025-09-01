@@ -8,29 +8,30 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 # --- enable the Triton prompt-sink path
 # os.environ["VLLM_USE_TRITON_PROMPT_SINK"] = "1"
 # os.environ["VLLM_SLIDING_WINDOW"] = "128"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
 
 os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "1"
 os.environ["VLLM_USE_V1"] = "1"
-os.environ["VLLM_ATTENTION_BACKEND"] = "TRITON_ATTN_VLLM_V1"
+# os.environ["VLLM_ATTENTION_BACKEND"] = "TRITON_ATTN_VLLM_V1"
+os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN"
 os.environ["SW"] = "128"
 
 # install monkey-patch
 from vllm_triton_hook import install_triton_prompt_sink_patch
 # install_triton_prompt_sink_patch()
 
-MODEL = "Qwen/Qwen3-1.7B"
+MODEL = "Qwen/Qwen3-8B"
 # MODEL = "openai/gpt-oss-20b"
 PRIME = "806917567"
 
 def build_prompts(tokenizer: PreTrainedTokenizer) -> list[str]:
     # Example variations with different "special numbers" or questions
-    special_numbers = [23, 37, 53]
+    special_numbers = [23, 37, 53] * 20
     questions = [
         "Prime factorize 806917567.",
         "Prime factorize 9999991.",
         "Prime factorize 1234567.",
-    ]
+    ] * 20
 
     prompts = []
     for num, q in zip(special_numbers, questions):
