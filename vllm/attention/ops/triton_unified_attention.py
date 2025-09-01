@@ -9,8 +9,13 @@
 
 import torch
 
+from typing import Optional
+
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
+# from vllm.triton_utils import tl, triton
+
+import triton
+import triton.language as tl
 
 logger = init_logger(__name__)
 
@@ -652,10 +657,16 @@ def unified_attention(
     qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
-    # prompt_idx=None,
+    pos: Optional[torch.Tensor] = None,
+    k_pos: Optional[torch.Tensor] = None, # [0,1,2,...,len0-1,0,1,2,...,len1-1,...]
+    gather_index: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
+    # max_seqlen_k: Optional[torch.Tensor] = None,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
+
+    # import pdb; pdb.set_trace()
 
     block_size = v.shape[1]
     assert q.element_size() >= 2 or block_size >= 32, \

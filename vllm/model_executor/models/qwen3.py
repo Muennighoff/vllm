@@ -166,6 +166,8 @@ class Qwen3Attention(nn.Module):
         k = k_by_head.view(k.shape)
 
         if os.environ.get("SW"):
+            if os.environ.get("SW_regular_rope"):
+                q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(
                 q,
                 k,
@@ -428,16 +430,16 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     print("WARNING: Chosen tokens is empty for sequence", b, "falling back to last token")
                     chosen = slots_b[-1:].clone()
                 chosen_per_seq.append(chosen)
-                # import IPython; IPython.embed(); exit(1)
 
             gather_index = torch.cat(chosen_per_seq, dim=0)
-            # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
             cu = [0] + list(itertools.accumulate(lengths))
             cu_seqlens_k = torch.tensor(cu, dtype=torch.int32, device=device)
             max_seqlen_k = torch.tensor(max(lengths), dtype=torch.int32, device=device)
             if max_seqlen_q == 1: # Clamp pos to avoid growing larger than full window
                 positions = torch.tensor(lengths).to(device) - 1
             k_pos = torch.cat([torch.arange(l) for l in lengths]).to(device)
+
+            # import pdb; pdb.set_trace()
 
             hidden_states = self.model(
                 input_ids, positions, intermediate_tensors, inputs_embeds,

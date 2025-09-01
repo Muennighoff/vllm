@@ -12,15 +12,17 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
 
 os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "1"
 os.environ["VLLM_USE_V1"] = "1"
-# os.environ["VLLM_ATTENTION_BACKEND"] = "TRITON_ATTN_VLLM_V1"
-os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN"
+os.environ["VLLM_ATTENTION_BACKEND"] = "TRITON_ATTN_VLLM_V1"
+# os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN"
 os.environ["SW"] = "128"
+os.environ["SW_regular_rope"] = "1"
 
 # install monkey-patch
 from vllm_triton_hook import install_triton_prompt_sink_patch
 # install_triton_prompt_sink_patch()
 
 MODEL = "Qwen/Qwen3-8B"
+# MODEL = "Qwen/Qwen3-1.7B"
 # MODEL = "openai/gpt-oss-20b"
 PRIME = "806917567"
 
@@ -70,7 +72,7 @@ def main():
     s = SamplingParams(
         temperature=0.0,     # deterministic to simplify checking
         top_p=1.0,
-        max_tokens=1200,     # long decode
+        max_tokens=12000,     # long decode
         # if your vLLM build surfaces sliding window via SamplingParams, add it there;
         # otherwise it’s enforced by our patch reading VLLM_SLIDING_WINDOW
     )

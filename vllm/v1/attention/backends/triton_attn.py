@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from functools import cache
 from typing import ClassVar, Optional
 
+import os
 import torch
 
 from vllm import _custom_ops as ops
@@ -217,6 +218,7 @@ class TritonAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
         sinks: Optional[torch.Tensor] = None,
+        rope = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -283,7 +285,11 @@ class TritonAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
-        # prompt_idx: Optional[torch.Tensor] = None,
+        pos: Optional[torch.Tensor] = None,
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -371,7 +377,8 @@ class TritonAttentionImpl(AttentionImpl):
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
-        max_seqlen_k = attn_metadata.max_seq_len
+        if not os.environ.get("SW"):
+            max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
         if use_prefill_decode_attn:
@@ -400,26 +407,53 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-            self.unified_attention(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                q_descale=None,  # Not supported
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-                sinks=self.sinks,
-                # prompt_idx=prompt_idx,
-            )
+            if os.environ.get("SW"):
+                self.unified_attention(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    q_descale=None,  # Not supported
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    sinks=self.sinks,
+                    pos=pos,
+                    k_pos=k_pos,
+                    gather_index=gather_index,
+                    cu_seqlens_k=cu_seqlens_k,
+                )
+
+            else:
+                self.unified_attention(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    q_descale=None,  # Not supported
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    sinks=self.sinks,
+                    # prompt_idx=prompt_idx,
+                )
 
         return output
