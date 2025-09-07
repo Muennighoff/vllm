@@ -302,6 +302,49 @@ def test_get_num_blocks_to_allocate():
                                               cached_blocks_2) == 15
 
 
+def test_sliding_window_pins_full_prompt_blocks_only():
+    # block_size = 16; prompt 15 => 0 full blocks pinned; prompt 18 => 1 full block pinned
+    block_size = 16
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=32,
+        use_mla=False,
+    )
+
+    block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    # Helper to set up a request with N blocks
+    def setup_req(req_id: str, num_blocks: int) -> None:
+        manager.req_to_blocks[req_id] = [KVCacheBlock(i + 1000) for i in range(num_blocks)]
+        manager.num_cached_block[req_id] = 0
+
+    # Case A: prompt_len=15 (< block_size) => ceil pinning -> 1 pinned block
+    req_a = "req_a"
+    setup_req(req_a, 4)
+    # Initialize pinned blocks from prompt len: floor division (full blocks only)
+    manager._pinned_blocks_by_req[req_a] = 15 // block_size
+    # Remove with num_computed_tokens large to try to evict older blocks
+    manager.remove_skipped_blocks(req_a, num_computed_tokens=10 * block_size)
+    # First block must remain
+    blocks_a = manager.req_to_blocks[req_a]
+    assert blocks_a[0] != block_pool.null_block
+
+    # Case B: prompt_len=18 (> block_size) => ceil pinning -> 2 pinned blocks
+    req_b = "req_b"
+    setup_req(req_b, 4)
+    manager._pinned_blocks_by_req[req_b] = 18 // block_size
+    # Try to remove aggressively
+    manager.remove_skipped_blocks(req_b, num_computed_tokens=10 * block_size)
+    blocks_b = manager.req_to_blocks[req_b]
+    # The first two full blocks must remain non-null; others may be freed
+    assert blocks_b[0] != block_pool.null_block
+    assert blocks_b[1] != block_pool.null_block
+
+
 def test_chunked_local_attention_get_num_blocks_to_allocate():
     block_size = 2
     attention_spec = ChunkedLocalAttentionSpec(

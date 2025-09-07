@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
@@ -300,6 +301,28 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
         self._null_block = block_pool.null_block
+        # Pin a global prompt prefix (in tokens) if specified via env.
+        # This prevents early prompt blocks from being freed when using SW.
+        try:
+            prompt_toks_env = os.environ.get("PROMPTTOKS")
+            self._pinned_prompt_toks = int(prompt_toks_env) if prompt_toks_env else 0
+        except Exception:
+            self._pinned_prompt_toks = 0
+        # Convert pinned tokens to pinned full blocks (ceil division)
+        self._pinned_blocks_env = cdiv(self._pinned_prompt_toks, self.block_size)
+        # Per-request pinned blocks (computed from actual prompt lengths)
+        self._pinned_blocks_by_req: dict[str, int] = {}
+
+    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+        # Initialize per-request pinned blocks based on actual prompt length.
+        if request.request_id not in self._pinned_blocks_by_req:
+            # Pin all prompt blocks including a partial tail (ceil),
+            # masking will ensure only exact prompt tokens are treated as global.
+            pinned_from_prompt = cdiv(request.num_prompt_tokens, self.block_size)
+            # Respect any env minimum if present
+            pinned = max(self._pinned_blocks_env, pinned_from_prompt)
+            self._pinned_blocks_by_req[request.request_id] = pinned
+        return super().cache_blocks(request, num_tokens)
 
     @classmethod
     def find_longest_cache_hit(
@@ -370,7 +393,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         last_useful_block = last_useful_token // self.block_size
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
-        for i in range(last_useful_block - 1, -1, -1):
+        # Do not remove pinned prefix blocks [0, _pinned_blocks)
+        pinned_blocks = self._pinned_blocks_by_req.get(request_id, self._pinned_blocks_env)
+        # Clamp scan range to valid block indices
+        start_idx = min(last_useful_block - 1, len(blocks) - 1)
+        end_idx = max(pinned_blocks - 1, -1)
+        for i in range(start_idx, end_idx, -1):
+            if i < 0:
+                break
+            if i >= len(blocks):
+                continue
             if blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls

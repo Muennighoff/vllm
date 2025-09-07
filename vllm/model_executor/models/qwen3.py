@@ -464,7 +464,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
                 max_seqlen_k=max_seqlen_k
             )
         else:
-            #import pdb; pdb.set_trace() 
+            # import pdb; pdb.set_trace() 
             hidden_states = self.model(
                 input_ids, positions, intermediate_tensors, inputs_embeds, 
                 k_pos=torch.empty(0, device=positions.device),

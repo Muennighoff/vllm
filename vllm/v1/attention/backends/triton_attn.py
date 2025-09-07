@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
+import os
 from functools import cache
 from typing import Any, ClassVar, Optional
 
@@ -268,6 +269,13 @@ class TritonAttentionImpl(AttentionImpl):
                 f"heads in the layer. Sinks shape: {sinks.shape}, "
                 f"num_heads: {num_heads}.")
 
+        # Sliding Window with Global tokens (SWT) support flags/state
+        swt_env = os.environ.get("SWT")
+        self._swt_window = int(swt_env) if swt_env else None
+        prompt_env = os.environ.get("PROMPTTOKS")
+        self._swt_prompt_toks = int(prompt_env) if prompt_env else None
+        self._swt_global_lens = None
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -400,9 +408,26 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
+            # Determine SWT mode and window size
+            use_swt = self._swt_window is not None
+            window_size_to_use = (self._swt_window - 1, 0) if use_swt else self.sliding_window
+
+            # Prepare per-sequence global prefix lengths if SWT is enabled
+            global_lens = None
+            if use_swt:
+                if (self._swt_global_lens is None) or (max_seqlen_q > 1):
+                    gl = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                    if self._swt_prompt_toks is not None and self._swt_prompt_toks > 0:
+                        clamp_val = torch.tensor(self._swt_prompt_toks,
+                                                 dtype=seqused_k.dtype,
+                                                 device=seqused_k.device)
+                        gl = torch.minimum(gl, clamp_val)
+                    self._swt_global_lens = torch.clamp(gl, min=0).clone()
+                global_lens = self._swt_global_lens
+
             self.unified_attention(
                 q=query[:num_actual_tokens],
-                k=key_cache, # torch.Size([36500, 16, 8, 128])
+                k=key_cache,
                 v=value_cache,
                 out=output[:num_actual_tokens],
                 cu_seqlens_q=cu_seqlens_q,
@@ -412,13 +437,14 @@ class TritonAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
+                window_size=window_size_to_use,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
                 q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
                 sinks=self.sinks,
+                global_lens=global_lens,
             )
 
         return output

@@ -193,3 +193,193 @@ def test_triton_unified_attn(
         atol, rtol = 1.5e-1, 1.5e-1
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
+
+
+@torch.inference_mode()
+def test_triton_unified_attn_global_plus_sliding():
+    torch.set_default_device("cuda")
+    current_platform.seed_everything(0)
+
+    # Two sequences with different prompt lengths and same decode length
+    # seq_lens = context_len (prompt) + query_len (decode)
+    query_lens = [8, 8]
+    prompt_lens = [20, 12]
+    kv_lens = [pl + ql for pl, ql in zip(prompt_lens, query_lens)]
+    num_seqs = 2
+
+    num_query_heads, num_kv_heads = 4, 4
+    head_size = 128
+    block_size = 16
+    sliding_window = 32
+    scale = head_size**-0.5
+
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    window_size = (sliding_window - 1, 0)
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size,
+                        dtype=torch.bfloat16)
+    num_blocks = 128
+    key_cache = torch.randn(num_blocks, block_size, num_kv_heads, head_size,
+                            dtype=torch.bfloat16)
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32)
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0, num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    # Compute per-seq global prefix lengths (prompt) tensor
+    global_lens = torch.tensor(prompt_lens, dtype=torch.int32, device=query.device)
+
+    # Run kernel
+    output = torch.empty_like(query)
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_tensor,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=0.0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        global_lens=global_lens,
+    )
+
+    # Reference with explicit mask: allow keys <= prompt_len OR within SW
+    # Build dense K,V per sequence
+    outputs = []
+    start_q = 0
+    for b in range(num_seqs):
+        qlen = query_lens[b]
+        klen = kv_lens[b]
+        q = query[start_q:start_q + qlen] * scale
+        start_q += qlen
+        num_kv_blocks = (klen + block_size - 1) // block_size
+        block_indices = block_tables[b, :num_kv_blocks]
+        k = key_cache[block_indices].view(-1, num_kv_heads, head_size)[:klen]
+        v = value_cache[block_indices].view(-1, num_kv_heads, head_size)[:klen]
+        if q.shape[1] != k.shape[1]:
+            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
+            v = torch.repeat_interleave(v, q.shape[1] // v.shape[1], dim=1)
+        attn = torch.einsum("qhd,khd->hqk", q, k).float()
+        # Build causal + SW + global mask
+        q_abs = torch.arange(prompt_lens[b], prompt_lens[b] + qlen).unsqueeze(1)  # (qlen,1)
+        k_abs = torch.arange(0, klen).unsqueeze(0)  # (1,klen)
+        causal = (k_abs <= q_abs)
+        in_window = ((q_abs - k_abs) < sliding_window)
+        in_global = (k_abs < prompt_lens[b])
+        mask = ~(causal & (in_window | in_global))
+        attn.masked_fill_(mask, float("-inf"))
+        attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        out = torch.einsum("hqk,khd->qhd", attn, v)
+        outputs.append(out)
+    ref = torch.cat(outputs, dim=0)
+
+    torch.testing.assert_close(output, ref, atol=1e-2, rtol=1e-2)
+
+
+@torch.inference_mode()
+def test_triton_unified_attn_global_plus_sliding_with_evicted():
+    torch.set_default_device("cuda")
+    current_platform.seed_everything(0)
+
+    # Two sequences with different prompt lengths; large prior decode so many early tokens fall outside SW
+    query_lens = [8, 8]
+    prompt_lens = [20, 12]
+    extra_ctx = [40, 60]  # prior decode tokens (already in context)
+    kv_lens = [pl + ec + ql for pl, ec, ql in zip(prompt_lens, extra_ctx, query_lens)]
+    num_seqs = 2
+
+    num_query_heads, num_kv_heads = 4, 4
+    head_size = 128
+    block_size = 16
+    sliding_window = 32
+    scale = head_size**-0.5
+
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    window_size = (sliding_window - 1, 0)
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size,
+                        dtype=torch.bfloat16)
+    num_blocks = 512
+    key_cache = torch.randn(num_blocks, block_size, num_kv_heads, head_size,
+                            dtype=torch.bfloat16)
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32)
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0, num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    global_lens = torch.tensor(prompt_lens, dtype=torch.int32, device=query.device)
+
+    # Run kernel
+    output = torch.empty_like(query)
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_tensor,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=0.0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        global_lens=global_lens,
+    )
+
+    # Reference mask allowing global prefix + sliding window around tail
+    outputs = []
+    start_q = 0
+    for b in range(num_seqs):
+        qlen = query_lens[b]
+        klen = kv_lens[b]
+        q = query[start_q:start_q + qlen] * scale
+        start_q += qlen
+        num_kv_blocks = (klen + block_size - 1) // block_size
+        block_indices = block_tables[b, :num_kv_blocks]
+        k = key_cache[block_indices].view(-1, num_kv_heads, head_size)[:klen]
+        v = value_cache[block_indices].view(-1, num_kv_heads, head_size)[:klen]
+        if q.shape[1] != k.shape[1]:
+            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
+            v = torch.repeat_interleave(v, q.shape[1] // v.shape[1], dim=1)
+        attn = torch.einsum("qhd,khd->hqk", q, k).float()
+        context_len = klen - qlen
+        q_abs = torch.arange(context_len, context_len + qlen).unsqueeze(1)
+        k_abs = torch.arange(0, klen).unsqueeze(0)
+        causal = (k_abs <= q_abs)
+        in_window = ((q_abs - k_abs) < sliding_window)
+        in_global = (k_abs < prompt_lens[b])
+        mask = ~(causal & (in_window | in_global))
+        attn.masked_fill_(mask, float("-inf"))
+        attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        out = torch.einsum("hqk,khd->qhd", attn, v)
+        outputs.append(out)
+    ref = torch.cat(outputs, dim=0)
+
+    torch.testing.assert_close(output, ref, atol=1e-2, rtol=1e-2)

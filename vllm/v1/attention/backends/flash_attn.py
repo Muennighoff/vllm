@@ -587,8 +587,8 @@ class FlashAttentionImpl(AttentionImpl):
                 else:
                     q = query[:num_actual_tokens]
 
-                if layer.layer_name == "model.layers.0.self_attn.attn":
-                    import pdb; pdb.set_trace()
+                # if layer.layer_name == "model.layers.0.self_attn.attn":
+                #     import pdb; pdb.set_trace()
 
                 flash_attn_varlen_func(
                     q=q,
@@ -638,6 +638,9 @@ class FlashAttentionImpl(AttentionImpl):
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
                 )
+
+            # if layer.layer_name == "model.layers.0.self_attn.attn":
+            #     import pdb; pdb.set_trace()
 
             return output
 
