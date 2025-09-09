@@ -246,7 +246,7 @@ def kernel_unified_attention_2d(
                 global_len = tl.load(global_lens_ptr + seq_idx)
                 # seq_offset are absolute positions [0..seq_len)
                 # queries are at absolute positions context_len + query_pos
-                # keep window keys if (q_abs - k_abs) < SLIDING_WINDOW (inclusive handled by +1 in host)
+                # keep window keys if (q_abs - k_abs) < window
                 q_abs = context_len + query_pos[:, None]
                 in_window = (q_abs - seq_offset) < SLIDING_WINDOW
                 in_global = seq_offset < global_len

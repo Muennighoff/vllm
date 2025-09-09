@@ -65,6 +65,8 @@ class CommonAttentionMetadata:
 
     causal: bool = True
 
+    prompt_lens: Optional[torch.Tensor] = None
+
 
 @dataclass
 class UbatchSlice:

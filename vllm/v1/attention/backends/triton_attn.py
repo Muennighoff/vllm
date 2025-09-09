@@ -56,6 +56,8 @@ class TritonAttentionMetadata:
     scheduler_metadata: Optional[torch.Tensor] = None
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
 
+    prompt_lens: Optional[torch.Tensor] = None
+
 
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -129,7 +131,9 @@ class TritonAttentionMetadataBuilder(
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            prompt_lens=common_attn_metadata.prompt_lens,
         )
+        # import pdb; pdb.set_trace()
         return attn_metadata
 
 
@@ -270,11 +274,9 @@ class TritonAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}.")
 
         # Sliding Window with Global tokens (SWT) support flags/state
-        swt_env = os.environ.get("SWT")
-        self._swt_window = int(swt_env) if swt_env else None
-        prompt_env = os.environ.get("PROMPTTOKS")
-        self._swt_prompt_toks = int(prompt_env) if prompt_env else None
-        self._swt_global_lens = None
+        self.use_swt = os.environ.get("SWT")
+        if self.use_swt:
+            assert int(os.environ.get("SWT")) == sliding_window
 
     def forward(
         self,
@@ -408,23 +410,6 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-            # Determine SWT mode and window size
-            use_swt = self._swt_window is not None
-            window_size_to_use = (self._swt_window - 1, 0) if use_swt else self.sliding_window
-
-            # Prepare per-sequence global prefix lengths if SWT is enabled
-            global_lens = None
-            if use_swt:
-                if (self._swt_global_lens is None) or (max_seqlen_q > 1):
-                    gl = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                    if self._swt_prompt_toks is not None and self._swt_prompt_toks > 0:
-                        clamp_val = torch.tensor(self._swt_prompt_toks,
-                                                 dtype=seqused_k.dtype,
-                                                 device=seqused_k.device)
-                        gl = torch.minimum(gl, clamp_val)
-                    self._swt_global_lens = torch.clamp(gl, min=0).clone()
-                global_lens = self._swt_global_lens
-
             self.unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -437,14 +422,14 @@ class TritonAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
-                window_size=window_size_to_use,
+                window_size=self.sliding_window,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
                 q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
                 sinks=self.sinks,
-                global_lens=global_lens,
+                global_lens=attn_metadata.prompt_lens if self.use_swt else None,
             )
 
         return output

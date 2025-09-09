@@ -859,6 +859,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
                 causal=True,
+                prompt_lens=torch.tensor(self.input_batch.num_prompt_tokens, device=seq_lens.device, dtype=seq_lens.dtype),
             )
 
             if self.speculative_config and \
