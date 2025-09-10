@@ -278,6 +278,18 @@ class TritonAttentionImpl(AttentionImpl):
         if self.use_swt:
             assert int(os.environ.get("SWT")) == sliding_window
 
+        # RoPE params for in-kernel application (used when SWT is enabled)
+        self.rope = rope
+        self.rotary_dim: Optional[int] = None
+        self.rope_base: Optional[float] = None
+        self._rope_inv_freq: Optional[torch.Tensor] = None
+        if self.rope is not None:
+            # RotaryEmbedding has attributes: head_size, rotary_dim, base
+            self.rotary_dim = getattr(self.rope, "rotary_dim", None)
+            self.rope_base = getattr(self.rope, "base", None)
+        # Whether the selected backend implementation supports extra kwargs
+        self._supports_kernel_rope: bool = not use_aiter_unified_attention()
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -410,6 +422,26 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
+            # Prepare RoPE inv_freq if SWT is enabled
+            rope_inv_freq = None
+            rotary_dim = None
+            if self.use_swt and self._supports_kernel_rope and self.rotary_dim is not None and self.rope_base is not None:
+                rotary_dim = int(self.rotary_dim)
+                device = query.device
+                # Prefer precomputed inv_freq buffer from the rope module if available
+                precomp = getattr(self.rope, "inv_freq", None)
+                if precomp is not None and precomp.numel() == (rotary_dim // 2):
+                    rope_inv_freq = precomp.to(device=device, dtype=torch.float32)
+                else:
+                    # Fallback: compute per device once and cache
+                    if (self._rope_inv_freq is None
+                            or self._rope_inv_freq.device != device
+                            or self._rope_inv_freq.shape[0] != (rotary_dim // 2)):
+                        idx = torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device)
+                        inv_freq = 1.0 / (float(self.rope_base)**(idx / float(rotary_dim)))
+                        self._rope_inv_freq = inv_freq.contiguous()
+                    rope_inv_freq = self._rope_inv_freq
+
             self.unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -430,6 +462,8 @@ class TritonAttentionImpl(AttentionImpl):
                 v_descale=layer._v_scale.expand(descale_shape),
                 sinks=self.sinks,
                 global_lens=attn_metadata.prompt_lens if self.use_swt else None,
+                rope_inv_freq=rope_inv_freq,
+                rotary_dim=rotary_dim,
             )
 
         return output

@@ -175,6 +175,19 @@ class Qwen3Attention(nn.Module):
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_k=max_seqlen_k,
             )
+        elif os.environ.get("SWT"):
+            # For Triton sliding-window-with-globals (SWT), apply RoPE in-kernel.
+            # Keep q and k unrotated here so kernels can reset positions.
+            attn_output = self.attn(
+                q,
+                k,
+                v,
+                pos=positions,
+                k_pos=k_pos,
+                gather_index=gather_index,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_k=max_seqlen_k,
+            )
         else:
             q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v)

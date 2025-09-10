@@ -81,6 +81,10 @@ def kernel_unified_attention_2d(
         # Optional per-sequence global lengths for SWT (sliding window with globals)
         global_lens_ptr,  # [num_seqs] or None
         USE_GSW: tl.constexpr,  # bool: use global+sliding window mask if true
+        # Optional RoPE parameters: when provided, apply RoPE in-kernel
+        rope_inv_freq_ptr,  # [rotary_dim//2] or None
+        USE_ROPE: tl.constexpr,  # bool
+        ROTARY_DIM: tl.constexpr,  # int
         stride_k_cache_0: tl.int64,  # int
         stride_k_cache_1: tl.int64,  # int
         stride_k_cache_2: tl.int64,  # int
@@ -227,10 +231,74 @@ def kernel_unified_attention_2d(
 
         seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
-        # S : (BLOCK_M, BLOCK_SIZE)
-        S = tl.zeros(shape=(BLOCK_M, BLOCK_SIZE), dtype=tl.float32)
+        # Start with standard dot product across all dims
+        S = scale * tl.dot(Q, K)
 
-        S += scale * tl.dot(Q, K)
+        if USE_ROPE:
+            # Apply RoPE only on first ROTARY_DIM dims by replacing their
+            # contribution with rotated values, keeping tail unchanged.
+            offs_half = tl.arange(0, ROTARY_DIM // 2)
+
+            # Load inv_freq
+            inv = tl.load(rope_inv_freq_ptr + offs_half)
+
+            # Q halves: (BLOCK_M, ROTARY_DIM//2)
+            q_first_offset = (query_offset_0[:, None] * query_stride_0 +
+                              query_offset_1[:, None] * query_stride_1 +
+                              offs_half[None, :])
+            q_second_offset = q_first_offset + (ROTARY_DIM // 2)
+            q1 = tl.load(query_ptr + q_first_offset,
+                         mask=(offs_half[None, :] < HEAD_SIZE) & query_mask_0[:, None] & query_mask_1[:, None],
+                         other=0.0).to(tl.float32)
+            q2 = tl.load(query_ptr + q_second_offset,
+                         mask=(offs_half[None, :] + (ROTARY_DIM // 2) < HEAD_SIZE) & query_mask_0[:, None] & query_mask_1[:, None],
+                         other=0.0).to(tl.float32)
+
+            # cos/sin for Q: (BLOCK_M, ROTARY_DIM//2)
+            angles_q = query_pos[:, None].to(tl.float32) * inv[None, :]
+            cos_q = tl.cos(angles_q)
+            sin_q = tl.sin(angles_q)
+            q1r = q1 * cos_q - q2 * sin_q
+            q2r = q2 * cos_q + q1 * sin_q
+
+            # K halves: (ROTARY_DIM//2, BLOCK_SIZE)
+            k_first_offset = (physical_block_idx * stride_k_cache_0 +
+                              kv_head_idx * stride_k_cache_2 +
+                              offs_half[:, None] * stride_k_cache_3 +
+                              offs_n[None, :] * stride_k_cache_1)
+            k_second_offset = k_first_offset + (ROTARY_DIM // 2) * stride_k_cache_3
+            K1_load = tl.load(key_cache_ptr + k_first_offset,
+                              mask=(offs_half[:, None] < HEAD_SIZE),
+                              other=0.0)
+            K2_load = tl.load(key_cache_ptr + k_second_offset,
+                              mask=(offs_half[:, None] + (ROTARY_DIM // 2) < HEAD_SIZE),
+                              other=0.0)
+            if K1_load.dtype.is_fp8():
+                if Q.dtype.is_fp8():
+                    K1 = K1_load
+                    K2 = K2_load
+                else:
+                    scale_k = tl.load(k_scale)
+                    K1 = (K1_load.to(tl.float32) * scale_k).to(Q.dtype)
+                    K2 = (K2_load.to(tl.float32) * scale_k).to(Q.dtype)
+            else:
+                K1 = K1_load
+                K2 = K2_load
+
+            angles_k = (seq_offset[None, :].to(tl.float32) - context_len) * inv[:, None]
+            cos_k = tl.cos(angles_k)
+            sin_k = tl.sin(angles_k)
+            K1f = K1.to(tl.float32)
+            K2f = K2.to(tl.float32)
+            K1r = K1f * cos_k - K2f * sin_k
+            K2r = K2f * cos_k + K1f * sin_k
+
+            # Compute unrotated rotary-dim contribution and rotated one
+            S_unrot = scale * tl.dot(q1.to(Q.dtype), K1.to(Q.dtype))
+            S_unrot += scale * tl.dot(q2.to(Q.dtype), K2.to(Q.dtype))
+            S_rot = scale * tl.dot(q1r.to(Q.dtype), K1r.to(Q.dtype))
+            S_rot += scale * tl.dot(q2r.to(Q.dtype), K2r.to(Q.dtype))
+            S = S - S_unrot + S_rot
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -344,6 +412,9 @@ def kernel_unified_attention_3d(
         SLIDING_WINDOW: tl.constexpr,  # int
         global_lens_ptr,  # [num_seqs] or None
         USE_GSW: tl.constexpr,  # bool
+        rope_inv_freq_ptr,  # [rotary_dim//2] or None
+        USE_ROPE: tl.constexpr,  # bool
+        ROTARY_DIM: tl.constexpr,  # int
         stride_k_cache_0: tl.int64,  # int
         stride_k_cache_1: tl.int64,  # int
         stride_k_cache_2: tl.int64,  # int
@@ -494,10 +565,66 @@ def kernel_unified_attention_3d(
 
         seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
-        # S : (BLOCK_M, BLOCK_SIZE)
-        S = tl.zeros(shape=(BLOCK_M, BLOCK_SIZE), dtype=tl.float32)
+        # Start with standard dot product across all dims
+        S = scale * tl.dot(Q, K)
 
-        S += scale * tl.dot(Q, K)
+        if USE_ROPE:
+            offs_half = tl.arange(0, ROTARY_DIM // 2)
+            inv = tl.load(rope_inv_freq_ptr + offs_half)
+
+            # Q halves
+            q_first_offset = (query_offset_0[:, None] * query_stride_0 +
+                              query_offset_1[:, None] * query_stride_1 +
+                              offs_half[None, :])
+            q_second_offset = q_first_offset + (ROTARY_DIM // 2)
+            q1 = tl.load(query_ptr + q_first_offset,
+                         mask=(offs_half[None, :] < HEAD_SIZE) & query_mask_0[:, None] & query_mask_1[:, None],
+                         other=0.0).to(tl.float32)
+            q2 = tl.load(query_ptr + q_second_offset,
+                         mask=(offs_half[None, :] + (ROTARY_DIM // 2) < HEAD_SIZE) & query_mask_0[:, None] & query_mask_1[:, None],
+                         other=0.0).to(tl.float32)
+            angles_q = query_pos[:, None].to(tl.float32) * inv[None, :]
+            cos_q = tl.cos(angles_q)
+            sin_q = tl.sin(angles_q)
+            q1r = q1 * cos_q - q2 * sin_q
+            q2r = q2 * cos_q + q1 * sin_q
+
+            # K halves
+            k_first_offset = (physical_block_idx * stride_k_cache_0 +
+                              kv_head_idx * stride_k_cache_2 +
+                              offs_half[:, None] * stride_k_cache_3 +
+                              offs_n[None, :] * stride_k_cache_1)
+            k_second_offset = k_first_offset + (ROTARY_DIM // 2) * stride_k_cache_3
+            K1_load = tl.load(key_cache_ptr + k_first_offset,
+                              mask=(offs_half[:, None] < HEAD_SIZE),
+                              other=0.0)
+            K2_load = tl.load(key_cache_ptr + k_second_offset,
+                              mask=(offs_half[:, None] + (ROTARY_DIM // 2) < HEAD_SIZE),
+                              other=0.0)
+            if K1_load.dtype.is_fp8():
+                if Q.dtype.is_fp8():
+                    K1 = K1_load
+                    K2 = K2_load
+                else:
+                    scale_k = tl.load(k_scale)
+                    K1 = (K1_load.to(tl.float32) * scale_k).to(Q.dtype)
+                    K2 = (K2_load.to(tl.float32) * scale_k).to(Q.dtype)
+            else:
+                K1 = K1_load
+                K2 = K2_load
+            angles_k = (seq_offset[None, :].to(tl.float32) - context_len) * inv[:, None]
+            cos_k = tl.cos(angles_k)
+            sin_k = tl.sin(angles_k)
+            K1f = K1.to(tl.float32)
+            K2f = K2.to(tl.float32)
+            K1r = K1f * cos_k - K2f * sin_k
+            K2r = K2f * cos_k + K1f * sin_k
+
+            S_unrot = scale * tl.dot(q1.to(Q.dtype), K1.to(Q.dtype))
+            S_unrot += scale * tl.dot(q2.to(Q.dtype), K2.to(Q.dtype))
+            S_rot = scale * tl.dot(q1r.to(Q.dtype), K1r.to(Q.dtype))
+            S_rot += scale * tl.dot(q2r.to(Q.dtype), K2r.to(Q.dtype))
+            S = S - S_unrot + S_rot
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -682,6 +809,9 @@ def unified_attention(
     sinks=None,
     # Optional per-sequence global prefix lengths to enable global+sliding window
     global_lens: Optional[torch.Tensor] = None,
+    # Optional RoPE inv_freq for applying RoPE in kernel. If None, no RoPE.
+    rope_inv_freq: Optional[torch.Tensor] = None,
+    rotary_dim: Optional[int] = None,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -755,6 +885,9 @@ def unified_attention(
             SLIDING_WINDOW=(1 + window_size[0]),
             global_lens_ptr=(global_lens if global_lens is not None else seqused_k),
             USE_GSW=(global_lens is not None),
+            rope_inv_freq_ptr=(rope_inv_freq if rope_inv_freq is not None else q),
+            USE_ROPE=(rope_inv_freq is not None),
+            ROTARY_DIM=(rotary_dim if rotary_dim is not None else head_size),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
             stride_k_cache_2=k.stride(2),
@@ -829,6 +962,9 @@ def unified_attention(
                 SLIDING_WINDOW=(1 + window_size[0]),
                 global_lens_ptr=(global_lens if global_lens is not None else seqused_k),
                 USE_GSW=(global_lens is not None),
+                rope_inv_freq_ptr=(rope_inv_freq if rope_inv_freq is not None else q),
+                USE_ROPE=(rope_inv_freq is not None),
+                ROTARY_DIM=(rotary_dim if rotary_dim is not None else head_size),
                 stride_k_cache_0=k.stride(0),
                 stride_k_cache_1=k.stride(1),
                 stride_k_cache_2=k.stride(2),
