@@ -33,7 +33,7 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         # Cache inv_freq for reuse by backends that compute RoPE on-the-fly
-        if os.environ.get("SWT"):
+        if os.environ.get("SWT") and (os.environ.get("SWT_regular_rope") is None):
             inv_freq_buf = self._compute_inv_freq(self.base)
             self.register_buffer("inv_freq", inv_freq_buf, persistent=False)
         else:

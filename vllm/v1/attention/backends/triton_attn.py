@@ -277,8 +277,7 @@ class TritonAttentionImpl(AttentionImpl):
         self.use_swt = os.environ.get("SWT")
         if self.use_swt:
             assert int(os.environ.get("SWT")) == sliding_window
-            if os.environ.get("SWT_regular_rope") is None:
-                self.rope = rope
+        self.rope = None if os.environ.get("SWT_regular_rope") else rope
 
     def forward(
         self,
