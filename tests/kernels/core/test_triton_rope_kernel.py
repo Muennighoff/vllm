@@ -136,6 +136,65 @@ def run_case(device: str = "cuda"):
     print("max_diff:", diff)
     assert diff < 7e-3, f"RoPE in-kernel mismatch: max diff {diff}"
 
+    # Also test the 2D kernel pathway by forcing prefill condition
+    max_seqlen_q_2d = 2  # triggers 2D path in unified_attention
+
+    out_ext2 = torch.empty_like(q_raw)
+    unified_attention(
+        q=q_ref,
+        k=k_cache_ref,
+        v=v_cache,
+        out=out_ext2,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max_seqlen_q_2d,
+        seqused_k=seq_lens,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=sm_scale,
+        causal=True,
+        window_size=window,
+        block_table=block_table,
+        softcap=softcap,
+        q_descale=None,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        alibi_slopes=None,
+        qq_bias=None,
+        sinks=None,
+        global_lens=None,
+        rope_inv_freq=None,
+        rotary_dim=None,
+    )
+
+    out_kernel2 = torch.empty_like(q_raw)
+    unified_attention(
+        q=q_raw,
+        k=k_cache_raw,
+        v=v_cache,
+        out=out_kernel2,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max_seqlen_q_2d,
+        seqused_k=seq_lens,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=sm_scale,
+        causal=True,
+        window_size=window,
+        block_table=block_table,
+        softcap=softcap,
+        q_descale=None,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        alibi_slopes=None,
+        qq_bias=None,
+        sinks=None,
+        global_lens=None,
+        rope_inv_freq=inv_freq,
+        rotary_dim=rotary_dim,
+    )
+
+    diff2 = (out_ext2 - out_kernel2).abs().max().item()
+    print("max_diff_2d:", diff2)
+    assert diff2 < 7e-3, f"RoPE in-kernel (2D) mismatch: max diff {diff2}"
+
 
 if __name__ == "__main__":
     # Ensure we use the Triton attention backend code path in case of side effects
