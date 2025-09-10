@@ -263,19 +263,17 @@ def kernel_unified_attention_2d(
         # full-dim dot by directly computing the rotated contribution for the
         # rotary sub-dimensions and adding the (optional) tail once.
         if USE_ROPE:
-            offs_half = tl.arange(0, ROTARY_DIM // 2)
-
-            # Load K halves directly
+            # Reuse precomputed offs_half_q for K-half offsets
             k_first_offset = (physical_block_idx * stride_k_cache_0 +
                               kv_head_idx * stride_k_cache_2 +
-                              offs_half[:, None] * stride_k_cache_3 +
+                              offs_half_q[:, None] * stride_k_cache_3 +
                               offs_n[None, :] * stride_k_cache_1)
             k_second_offset = k_first_offset + (ROTARY_DIM // 2) * stride_k_cache_3
             K1_load = tl.load(key_cache_ptr + k_first_offset,
-                              mask=(offs_half[:, None] < HEAD_SIZE),
+                              mask=(offs_half_q[:, None] < HEAD_SIZE),
                               other=0.0)
             K2_load = tl.load(key_cache_ptr + k_second_offset,
-                              mask=(offs_half[:, None] + (ROTARY_DIM // 2) < HEAD_SIZE),
+                              mask=(offs_half_q[:, None] + (ROTARY_DIM // 2) < HEAD_SIZE),
                               other=0.0)
             if K1_load.dtype.is_fp8():
                 if Q.dtype.is_fp8():
@@ -304,14 +302,13 @@ def kernel_unified_attention_2d(
 
             # Add non-rotary tail contribution if present
             if ROTARY_DIM < HEAD_SIZE:
-                offs_tail = tl.arange(0, HEAD_SIZE - ROTARY_DIM)
                 # K tail
                 k_tail_offset = (physical_block_idx * stride_k_cache_0 +
                                  kv_head_idx * stride_k_cache_2 +
-                                 (ROTARY_DIM + offs_tail)[:, None] * stride_k_cache_3 +
+                                 (ROTARY_DIM + offs_tail_q)[:, None] * stride_k_cache_3 +
                                  offs_n[None, :] * stride_k_cache_1)
                 Kt_load = tl.load(key_cache_ptr + k_tail_offset,
-                                  mask=((ROTARY_DIM + offs_tail)[:, None] < HEAD_SIZE),
+                                  mask=((ROTARY_DIM + offs_tail_q)[:, None] < HEAD_SIZE),
                                   other=0.0)
                 if Kt_load.dtype.is_fp8():
                     if Q.dtype.is_fp8():
