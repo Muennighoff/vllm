@@ -365,8 +365,6 @@ class Qwen2Model(nn.Module):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = []
-        # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
-
         for idx, layer in enumerate(
                 self.layers[self.start_layer:self.end_layer]):
             if idx in self.aux_hidden_state_layers:

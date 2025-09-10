@@ -381,7 +381,6 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         # if duplicate prompt, positions is sth like:
         # [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 16, 17, 18, 19, 20, 21, 22]
         if self.sw and ((forward_context := get_forward_context()).attn_metadata is not None):
-            # import pdb; pdb.set_trace()
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = next(iter(attn_metadata.values()))
@@ -454,7 +453,6 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
                 chosen_per_seq.append(chosen)
 
             gather_index = torch.cat(chosen_per_seq, dim=0)
-            # import pdb; pdb.set_trace()  # Check if we are in sliding window mode
             cu = [0] + list(itertools.accumulate(lengths))
             cu_seqlens_k = torch.tensor(cu, dtype=torch.int32, device=device)
             max_seqlen_k = torch.tensor(max(lengths), dtype=torch.int32, device=device)
@@ -469,7 +467,6 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
                 max_seqlen_k=max_seqlen_k
             )
         else:
-            # import pdb; pdb.set_trace() 
             hidden_states = self.model(
                 input_ids, positions, intermediate_tensors, inputs_embeds, 
                 k_pos=torch.empty(0, device=positions.device),
