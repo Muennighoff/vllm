@@ -34,9 +34,9 @@ def run_config(name: str, model_name: str, prompts: List[str], env_vars: Dict[st
 
         # Create model with optional hf overrides
         if hf_overrides:
-            model = LLM(model_name, hf_overrides=hf_overrides)
+            model = LLM(model_name, hf_overrides=hf_overrides, block_size=64)
         else:
-            model = LLM(model_name)
+            model = LLM(model_name, block_size=64)
 
         # Generate on a batch of texts
         out = model.generate(texts, sampling_params=s)
@@ -66,16 +66,19 @@ if __name__ == "__main__":
 
     # Two similar but slightly different prompts (different lengths)
     prompts = [
+        # "Prime factorize the non-prime 806917567.",
         "Prime factorize the non-prime 806917567.",
-        "Please compute and list the prime factorization of the integer 806917567 for me, step by step."
+        #"Please compute and list the prime factorization of the integer 806917567 for me, step by step."
+        #"Please compute and list the prime factorization of the integer 806917567 for me, step by step."        
     ]
 
-    # Define the configs as in your script
+    SW = 2
+
     configs = [
         ("flash", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0"}, None),
-        ("flash_sw", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "SW": "32", "SW_regular_rope": "1"}, None),
+        ("flash_sw", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "SW": str(SW), "SW_regular_rope": "1"}, None),
         ("triton", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1"}, None),
-        ("triton_sw", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "SWT": "32"}, {"use_sliding_window": True, "sliding_window": 32}),
+        ("triton_sw", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1", "SWT": str(SW)}, {"use_sliding_window": True, "sliding_window": SW}),
     ]
 
     q = ctx.Queue()
@@ -85,7 +88,7 @@ if __name__ == "__main__":
     print("\n=== PHASE A: max_tokens=32 (expect SW and non-SW parity where intended) ===")
     for name, env_vars, hf_overrides in configs:
         print(f"\n--- Running config: {name} ---")
-        p = ctx.Process(target=run_config, args=(name, model_name, prompts, env_vars, hf_overrides, 32, q))
+        p = ctx.Process(target=run_config, args=(name, model_name, prompts, env_vars, hf_overrides, 8, q))
         p.start()
         p.join()
 
@@ -118,7 +121,7 @@ if __name__ == "__main__":
     print("\n=== PHASE B: max_tokens=64 (expect differences between SW and non-SW) ===")
     for name, env_vars, hf_overrides in configs:
         print(f"\n--- Running config: {name} ---")
-        p = ctx.Process(target=run_config, args=(name, model_name, prompts, env_vars, hf_overrides, 64, q))
+        p = ctx.Process(target=run_config, args=(name, model_name, prompts, env_vars, hf_overrides, 32, q))
         p.start()
         p.join()
 

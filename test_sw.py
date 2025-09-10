@@ -53,13 +53,14 @@ if __name__ == "__main__":
     model_name = "/data/niklas/s2/Qwen3-1.7B"
     # prompt = "Prime factorize the non-prime 806917567."
     prompt = "Please compute and list the prime factorization of the integer 806917567 for me, step by step."
-
+    #prompt = "Please prime factorize the non-prime 806917567 into its factors."
     # Define the configs exactly like your original script
     configs = [
         ("flash", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0"}, None),
-        ("flash_sw", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "SW": "32", "SW_regular_rope": "1"}, None),
+        # ("flash_sw", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "SW": "32", "SW_regular_rope": "1"}, None),
+        ("flash_sw", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "SW": "32"}, None),        
         ("triton", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1"}, None),
-        ("triton_sw", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "SWT": "32"}, {"use_sliding_window": True, "sliding_window": 32}),
+        ("triton_sw", {"VLLM_ENABLE_V1_MULTIPROCESSING": "0", "VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1", "SWT": "32"}, {"use_sliding_window": True, "sliding_window": 32}),
     ]
 
     q = ctx.Queue()
