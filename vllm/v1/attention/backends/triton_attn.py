@@ -432,7 +432,7 @@ class TritonAttentionImpl(AttentionImpl):
                 v_descale=layer._v_scale.expand(descale_shape),
                 sinks=self.sinks,
                 global_lens=attn_metadata.prompt_lens if self.use_swt else None,
-                rope_inv_freq=self.rope_inv_freq if self.rope is not None else None,
+                rope_inv_freq=self.rope.inv_freq if self.rope is not None else None,
                 rotary_dim=self.rope.rotary_dim if self.rope is not None else None,
             )
 

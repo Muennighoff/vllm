@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Rotary Positional Embeddings Base Class."""
+import os
 from typing import Optional
 
 import torch
@@ -32,8 +33,7 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         # Cache inv_freq for reuse by backends that compute RoPE on-the-fly
-        self.use_swt = os.environ.get("SWT")
-        if self.use_swt:
+        if os.environ.get("SWT"):
             inv_freq_buf = self._compute_inv_freq(self.base)
             self.register_buffer("inv_freq", inv_freq_buf, persistent=False)
         else:

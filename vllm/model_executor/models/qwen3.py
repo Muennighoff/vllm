@@ -422,7 +422,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
                 
                 # === Decide what to keep for this sequence: prompt (first pass) or stored prompt + window (later) ===
                 if is_first_pass:
-                    print("ISFIRSTPASS!!!", L)
+                    print("FIRSTPASS", L)
                     # Take prompt_end = PROMPTTOKS + 1 if provided, else full prompt length L
                     prompt_end = prompt_toks_env + 1 if prompt_toks_env is not None else L
                     prompt_end = min(prompt_end, L)
