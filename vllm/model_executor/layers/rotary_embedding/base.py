@@ -32,13 +32,15 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         # Cache inv_freq for reuse by backends that compute RoPE on-the-fly
-        inv_freq_buf = self._compute_inv_freq(self.base)
-        self.register_buffer("inv_freq", inv_freq_buf, persistent=False)
-
-        cache = self._compute_cos_sin_cache()
-        cache = cache.to(dtype)
-        self.cos_sin_cache: torch.Tensor
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.use_swt = os.environ.get("SWT")
+        if self.use_swt:
+            inv_freq_buf = self._compute_inv_freq(self.base)
+            self.register_buffer("inv_freq", inv_freq_buf, persistent=False)
+        else:
+            cache = self._compute_cos_sin_cache()
+            cache = cache.to(dtype)
+            self.cos_sin_cache: torch.Tensor
+            self.register_buffer("cos_sin_cache", cache, persistent=False)
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""

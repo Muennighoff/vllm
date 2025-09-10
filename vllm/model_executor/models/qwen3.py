@@ -176,18 +176,9 @@ class Qwen3Attention(nn.Module):
                 max_seqlen_k=max_seqlen_k,
             )
         elif os.environ.get("SWT"):
-            # For Triton sliding-window-with-globals (SWT), apply RoPE in-kernel.
-            # Keep q and k unrotated here so kernels can reset positions.
-            attn_output = self.attn(
-                q,
-                k,
-                v,
-                pos=positions,
-                k_pos=k_pos,
-                gather_index=gather_index,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_k=max_seqlen_k,
-            )
+            if os.environ.get("SWT_regular_rope"):
+                q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
         else:
             q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v)
@@ -432,6 +423,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
                 
                 # === Decide what to keep for this sequence: prompt (first pass) or stored prompt + window (later) ===
                 if is_first_pass:
+                    print("ISFIRSTPASS!!!", L)
                     # Take prompt_end = PROMPTTOKS + 1 if provided, else full prompt length L
                     prompt_end = prompt_toks_env + 1 if prompt_toks_env is not None else L
                     prompt_end = min(prompt_end, L)
