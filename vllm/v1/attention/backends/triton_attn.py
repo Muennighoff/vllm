@@ -133,7 +133,6 @@ class TritonAttentionMetadataBuilder(
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             prompt_lens=common_attn_metadata.prompt_lens,
         )
-        # import pdb; pdb.set_trace()
         return attn_metadata
 
 
@@ -275,9 +274,11 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Sliding Window with Global tokens (SWT) support flags/state
         self.use_swt = os.environ.get("SWT")
+        self.rope = None
         if self.use_swt:
             assert int(os.environ.get("SWT")) == sliding_window
-        self.rope = None if os.environ.get("SWT_regular_rope") else rope
+            if not(os.environ.get("SWT_regular_rope")):
+                self.rope = rope
 
     def forward(
         self,

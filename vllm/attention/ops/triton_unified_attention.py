@@ -334,13 +334,9 @@ def kernel_unified_attention_2d(
             if USE_GSW:
                 # Allow keys if they are within the sliding window OR within the global prefix
                 global_len = tl.load(global_lens_ptr + seq_idx)
-                # seq_offset are absolute positions [0..seq_len)
-                # queries are at absolute positions context_len + query_pos
-                # keep window keys if (q_abs - k_abs) < window
-                q_abs = context_len + query_pos[:, None]
-                in_window = (q_abs - seq_offset) < SLIDING_WINDOW
+                in_window = (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW
                 in_global = seq_offset < global_len
-                S = tl.where((in_window & (seq_offset <= q_abs)) | in_global, S, float("-inf"))
+                S = tl.where(in_window | in_global, S, float("-inf"))                
             else:
                 S = tl.where((context_len + query_pos[:, None] - seq_offset)
                              < SLIDING_WINDOW, S, float("-inf"))
@@ -553,6 +549,7 @@ def kernel_unified_attention_3d(
                      mask=(offs_half_q[None, :] + (ROTARY_DIM // 2) < HEAD_SIZE) & query_mask_0[:, None] & query_mask_1[:, None],
                      other=0.0).to(tl.float32)
         angles_q = query_pos[:, None].to(tl.float32) * inv_q[None, :]
+
         cos_q = tl.cos(angles_q)
         sin_q = tl.sin(angles_q)
         q1r_pre = q1 * cos_q - q2 * sin_q
@@ -682,10 +679,9 @@ def kernel_unified_attention_3d(
         if SLIDING_WINDOW > 0:
             if USE_GSW:
                 global_len = tl.load(global_lens_ptr + seq_idx)
-                q_abs = context_len + query_pos[:, None]
-                in_window = (q_abs - seq_offset) < SLIDING_WINDOW
+                in_window = (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW
                 in_global = seq_offset < global_len
-                S = tl.where((in_window & (seq_offset <= q_abs)) | in_global, S, float("-inf"))
+                S = tl.where(in_window | in_global, S, float("-inf"))
             else:
                 S = tl.where((context_len + query_pos[:, None] - seq_offset)
                              < SLIDING_WINDOW, S, float("-inf"))
