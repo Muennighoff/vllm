@@ -3,7 +3,7 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Any, TYPE_CHECKING, Optional, Union
 
 import torch
 import torch._dynamo.decorators
@@ -622,6 +622,7 @@ class FlexAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
+        rope: Optional[Any] = None,
         **kwargs,
     ) -> None:
         self.num_heads = num_heads
@@ -682,6 +683,11 @@ class FlexAttentionImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
+        pos: Optional[torch.Tensor] = None,
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FLexAttention.
 

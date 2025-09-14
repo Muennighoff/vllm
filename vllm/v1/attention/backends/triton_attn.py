@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
+import os
 from functools import cache
-from typing import ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 import torch
 
@@ -54,6 +55,8 @@ class TritonAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: Optional[torch.Tensor] = None
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
+
+    prompt_lens: Optional[torch.Tensor] = None
 
 
 class TritonAttentionMetadataBuilder(
@@ -128,6 +131,7 @@ class TritonAttentionMetadataBuilder(
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            prompt_lens=common_attn_metadata.prompt_lens,
         )
         return attn_metadata
 
@@ -211,6 +215,7 @@ class TritonAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
         sinks: Optional[torch.Tensor] = None,
+        rope: Optional[Any] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -267,6 +272,14 @@ class TritonAttentionImpl(AttentionImpl):
                 f"heads in the layer. Sinks shape: {sinks.shape}, "
                 f"num_heads: {num_heads}.")
 
+        # Sliding Window with Global tokens (SWT) support flags/state
+        self.use_swt = os.environ.get("SWT")
+        self.rope = None
+        if self.use_swt:
+            assert int(os.environ.get("SWT")) == sliding_window
+            if not(os.environ.get("SWT_regular_rope")):
+                self.rope = rope
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -278,6 +291,11 @@ class TritonAttentionImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
+        pos: Optional[torch.Tensor] = None,
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -413,6 +431,9 @@ class TritonAttentionImpl(AttentionImpl):
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
                 sinks=self.sinks,
+                global_lens=attn_metadata.prompt_lens if self.use_swt else None,
+                rope_inv_freq=self.rope.inv_freq if self.rope is not None else None,
+                rotary_dim=self.rope.rotary_dim if self.rope is not None else None,
             )
 
         return output

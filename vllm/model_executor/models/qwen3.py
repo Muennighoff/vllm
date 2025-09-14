@@ -23,6 +23,8 @@
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
+import itertools
+import os
 from typing import Any, Optional, Union
 
 import torch
@@ -49,6 +51,8 @@ from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     maybe_prefix)
+
+from vllm.forward_context import ForwardContext, get_forward_context
 
 logger = init_logger(__name__)
 
@@ -133,6 +137,7 @@ class Qwen3Attention(nn.Module):
                 "layer_idx": extract_layer_index(prefix),
                 "dual_chunk_attention_config": dual_chunk_attention_config,
             } if dual_chunk_attention_config else {},
+            rope=self.rotary_emb,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -141,6 +146,10 @@ class Qwen3Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -153,8 +162,26 @@ class Qwen3Attention(nn.Module):
                            self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        if os.environ.get("SW"):
+            if os.environ.get("SW_regular_rope"):
+                q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(
+                q,
+                k,
+                v,
+                pos=positions,
+                k_pos=k_pos,
+                gather_index=gather_index,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_k=max_seqlen_k,
+            )
+        elif os.environ.get("SWT"):
+            if os.environ.get("SWT_regular_rope"):
+                q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -219,6 +246,10 @@ class Qwen3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
+        k_pos: Optional[torch.Tensor] = None,
+        gather_index: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_k: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -227,9 +258,14 @@ class Qwen3DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
+            k_pos=k_pos,
+            gather_index=gather_index,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_k=max_seqlen_k,
         )
 
         # Fully Connected
@@ -303,6 +339,17 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        
+        # Debug
+        # from transformers import AutoTokenizer
+        # self.tokenizer = AutoTokenizer.from_pretrained("/data/niklas/s2/Qwen3-1.7B")
+        # self.txt = ""
+        # self.toks = 0
+        if (sw := os.environ.get("SW")):
+            self.sw = int(sw)
+            print(f"Using sliding window with size {self.sw}")
+        else:
+            self.sw = None
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
@@ -321,8 +368,112 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+        # Debug
+        # if len(input_ids.shape) > 1:
+        # self.txt += self.tokenizer.decode(input_ids)
+        # self.toks += input_ids.shape[0]
+        #if self.toks % 1000 == 0:
+        #    print(f"Processed {self.toks} tokens so far.")
+        # print("-"*20)
+        # print(self.txt)
+        # print("-"*20)
+        # NOTE(niklas): input_ids is of shape ~(bs*seq_len,) i.e. batches concatenated
+        # if duplicate prompt, positions is sth like:
+        # [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 16, 17, 18, 19, 20, 21, 22]
+        if self.sw and ((forward_context := get_forward_context()).attn_metadata is not None):
+            attn_metadata = forward_context.attn_metadata
+            if isinstance(attn_metadata, dict):
+                attn_metadata = next(iter(attn_metadata.values()))
+            max_seqlen_q = attn_metadata.max_query_len
+            block_table = attn_metadata.block_table
+            block_size = forward_context.block_size
+
+            # Prompt tokens to keep if provided via env; otherwise keep full prompt on first pass
+            prompt_toks_env = os.environ.get("PROMPTTOKS")
+            prompt_toks_env = int(prompt_toks_env) if prompt_toks_env is not None else None
+
+            # === Metadata / containers ===
+            seq_lens = attn_metadata.seq_lens
+            B = seq_lens.shape[0]
+            chosen_per_seq = []   # list of 1-D long tensors (slot indices) per sequence in batch
+            lengths = []          # lengths per sequence
+            # For first-pass detection: store per-sequence prompt slots on self.prompt_slots (list of tensors)
+            is_first_pass = (not hasattr(self, "prompt_slots")) or (max_seqlen_q > 1)
+            device = positions.device
+            block_size_arange = torch.arange(block_size, dtype=torch.long, device=device).unsqueeze(0)
+
+            for b in range(B):
+                if (L := int(seq_lens[b])) <= 0:
+                    print("WARNING: Sequence length is 0 for batch element", b)
+                    chosen_per_seq.append(torch.empty(0))
+                    lengths.append(0)
+                    continue
+
+                if (num_blocks_used := (L + block_size - 1) // block_size) == 0:
+                    print("WARNING: No blocks used for sequence", b)
+                    slots_b = torch.empty(0)
+                else:
+                    # slice first num_blocks_used block ids
+                    block_ids = block_table[b, :num_blocks_used]  # (num_blocks_used,)
+                    # compute base indices for each block: (num_blocks_used, 1)
+                    # & expand with arange: (num_blocks_used, block_size)
+                    # then reshape into a flat list of slots & take exactly L of them
+                    slots_b = ((block_ids * block_size).unsqueeze(1) + block_size_arange).reshape(-1)[:L]
+                
+                # === Decide what to keep for this sequence: prompt (first pass) or stored prompt + window (later) ===
+                if is_first_pass:
+                    print("FIRSTPASS", L)
+                    # Take prompt_end = PROMPTTOKS + 1 if provided, else full prompt length L
+                    prompt_end = prompt_toks_env + 1 if prompt_toks_env is not None else L
+                    prompt_end = min(prompt_end, L)
+                    # prefix = first prompt_end tokens
+                    prefix = slots_b[:prompt_end]
+                    chosen = torch.cat([prefix, slots_b[prompt_end:][-self.sw:]], dim=0)
+                    # store the prompt prefix for future calls (one entry per batch element)
+                    if (not hasattr(self, "prompt_slots")) or (B > len(self.prompt_slots)):
+                        self.prompt_slots = [None] * B
+                    self.prompt_slots[b] = prefix.clone()
+                else:
+                    # Subsequent passes: reuse stored prefix for this sequence (if any)
+                    if hasattr(self, "prompt_slots") and self.prompt_slots is not None:
+                        prefix = self.prompt_slots[b]
+                    else:
+                        print("WARNING: No stored prefix for sequence", b, "falling back to no prefix")
+                        # Fall back to keeping nothing of the prefix (unlikely)
+                        prefix = torch.empty(0, dtype=torch.long, device=device)
+
+                    tail = slots_b[-self.sw:]
+                    chosen = torch.cat([prefix, tail[~torch.isin(tail, prefix)]], dim=0)
+
+                lengths.append(int(chosen.numel()))
+                # If chosen ended up empty but the sequence has tokens, ensure we keep at least the last token
+                if lengths[-1] == 0 and slots_b.numel() > 0:
+                    print("WARNING: Chosen tokens is empty for sequence", b, "falling back to last token")
+                    chosen = slots_b[-1:].clone()
+                chosen_per_seq.append(chosen)
+
+            gather_index = torch.cat(chosen_per_seq, dim=0)
+            cu = [0] + list(itertools.accumulate(lengths))
+            cu_seqlens_k = torch.tensor(cu, dtype=torch.int32, device=device)
+            max_seqlen_k = torch.tensor(max(lengths), dtype=torch.int32, device=device)
+            if max_seqlen_q == 1: # Clamp pos to avoid growing larger than full window
+                positions = torch.tensor(lengths).to(device) - 1
+            k_pos = torch.cat([torch.arange(l) for l in lengths]).to(device)
+
+
+            hidden_states = self.model(
+                input_ids, positions, intermediate_tensors, inputs_embeds,
+                k_pos=k_pos, gather_index=gather_index, cu_seqlens_k=cu_seqlens_k, 
+                max_seqlen_k=max_seqlen_k
+            )
+        else:
+            hidden_states = self.model(
+                input_ids, positions, intermediate_tensors, inputs_embeds, 
+                k_pos=torch.empty(0, device=positions.device),
+                gather_index=torch.empty(0, device=positions.device),
+                cu_seqlens_k=torch.empty(0, device=positions.device),
+                max_seqlen_k=torch.empty(0, device=positions.device),
+            )
         return hidden_states
 
     def compute_logits(

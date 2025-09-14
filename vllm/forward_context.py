@@ -177,6 +177,7 @@ class ForwardContext:
     # by default NONE, no cudagraph is used.
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
     batch_descriptor: Optional[BatchDescriptor] = None
+    block_size: Optional[int] = None  ### Muennighoff
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode in [
@@ -229,6 +230,7 @@ def set_forward_context(
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
+        block_size=vllm_config.cache_config.block_size, ### Muennighoff
     )
 
     try:
