@@ -439,7 +439,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 positions = torch.tensor(lengths).to(device) - 1
             k_pos = torch.cat([torch.arange(l) for l in lengths]).to(device)
 
-            # import pdb; pdb.set_trace()
+            import pdb; pdb.set_trace()
 
             hidden_states = self.model(
                 input_ids, positions, intermediate_tensors, inputs_embeds,
