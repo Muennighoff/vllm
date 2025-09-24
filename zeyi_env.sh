@@ -15,3 +15,15 @@ VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 # npm -v
 # # Download claude code
 # npm install -g @anthropic-ai/claude-code
+
+
+
+# nightly env
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv venv --python=python3.12 .nightly_venv
+source .nightly_venv/bin/activate
+uv pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
+cd vllm
+# uv pip install -e .
+VLLM_USE_PRECOMPILED=1 uv pip install --editable .

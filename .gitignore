@@ -208,3 +208,4 @@ shellcheck*/
 csrc/moe/marlin_moe_wna16/kernel_*
 
 .vllm_venv/
+.nightly_venv/
