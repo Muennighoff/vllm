@@ -3,6 +3,7 @@
 """High-Performance Triton-only Attention layer."""
 from dataclasses import dataclass
 from typing import ClassVar, Optional
+import os
 
 import torch
 
@@ -57,6 +58,8 @@ class TritonAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: Optional[torch.Tensor] = None
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
+
+    prompt_lens: Optional[torch.Tensor] = None
 
 
 class TritonAttentionMetadataBuilder(
@@ -131,6 +134,7 @@ class TritonAttentionMetadataBuilder(
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            prompt_lens=common_attn_metadata.prompt_lens,
         )
         return attn_metadata
 
@@ -241,6 +245,11 @@ class TritonAttentionImpl(AttentionImpl):
                 "Sinks must have the same number of heads as the number of "
                 f"heads in the layer. Sinks shape: {sinks.shape}, "
                 f"num_heads: {num_heads}.")
+
+        # Sliding Window with Global tokens (SWT) support flags/state
+        self.use_swt = os.environ.get("SWT")
+        if self.use_swt:
+            assert int(os.environ.get("SWT")) == sliding_window
 
     def forward(
         self,
@@ -355,6 +364,7 @@ class TritonAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
             sinks=self.sinks,
+            global_lens=attn_metadata.prompt_lens if self.use_swt else None,
             output_scale=output_scale,
         )
 

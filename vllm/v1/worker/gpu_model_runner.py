@@ -1240,6 +1240,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                prompt_lens=torch.tensor(self.input_batch.num_prompt_tokens, device=seq_lens.device, dtype=seq_lens.dtype),
             )
 
             if (self.speculative_config

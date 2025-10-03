@@ -83,6 +83,8 @@ class CommonAttentionMetadata:
     # Needed by CrossAttentionBuilder
     encoder_seq_lens: Optional[np.ndarray] = None
 
+    prompt_lens: Optional[torch.Tensor] = None
+
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,

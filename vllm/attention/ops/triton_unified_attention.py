@@ -81,6 +81,9 @@ def kernel_unified_attention_2d(
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
+    # Optional per-sequence global lengths for SWT (sliding window with globals)
+    global_lens_ptr,  # [num_seqs] or None
+    USE_GSW: tl.constexpr,  # bool: use global+sliding window mask if true
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
@@ -263,9 +266,18 @@ def kernel_unified_attention_2d(
         S = tl.where(query_mask_1[:, None] & query_mask_0[:, None] & seq_mask,
                      S, float("-inf"))
 
+
+        # Apply sliding window with optional global prefix allowance (GSW)
         if SLIDING_WINDOW > 0:
-            S = tl.where((context_len + query_pos[:, None] - seq_offset)
-                         < SLIDING_WINDOW, S, float("-inf"))
+            if USE_GSW:
+                # Allow keys if they are within the sliding window OR within the global prefix
+                global_len = tl.load(global_lens_ptr + seq_idx)
+                in_window = (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW
+                in_global = seq_offset < global_len
+                S = tl.where(in_window | in_global, S, float("-inf"))                
+            else:
+                S = tl.where((context_len + query_pos[:, None] - seq_offset)
+                             < SLIDING_WINDOW, S, float("-inf"))
 
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)
@@ -359,6 +371,8 @@ def kernel_unified_attention_3d(
         USE_SOFTCAP: tl.constexpr,  # bool
         USE_SINKS: tl.constexpr,  # bool
         SLIDING_WINDOW: tl.constexpr,  # int
+        global_lens_ptr,  # [num_seqs] or None
+        USE_GSW: tl.constexpr,  # bool
         stride_k_cache_0: tl.int64,  # int
         stride_k_cache_1: tl.int64,  # int
         stride_k_cache_2: tl.int64,  # int
@@ -530,9 +544,16 @@ def kernel_unified_attention_3d(
         S = tl.where(query_mask_1[:, None] & query_mask_0[:, None] & seq_mask,
                      S, float("-inf"))
 
+        # Apply sliding window with optional global prefix allowance (GSW)
         if SLIDING_WINDOW > 0:
-            S = tl.where((context_len + query_pos[:, None] - seq_offset)
-                         < SLIDING_WINDOW, S, float("-inf"))
+            if USE_GSW:
+                global_len = tl.load(global_lens_ptr + seq_idx)
+                in_window = (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW
+                in_global = seq_offset < global_len
+                S = tl.where(in_window | in_global, S, float("-inf"))
+            else:
+                S = tl.where((context_len + query_pos[:, None] - seq_offset)
+                             < SLIDING_WINDOW, S, float("-inf"))
 
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)
@@ -706,6 +727,8 @@ def unified_attention(
     qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
+    # Optional per-sequence global prefix lengths to enable global+sliding window
+    global_lens=None,
 ):
 
     assert causal, "Only causal attention is supported"
@@ -783,6 +806,8 @@ def unified_attention(
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
             SLIDING_WINDOW=(1 + window_size[0]),
+            global_lens_ptr=(global_lens if global_lens is not None else seqused_k),
+            USE_GSW=(global_lens is not None),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
             stride_k_cache_2=k.stride(2),
@@ -857,6 +882,8 @@ def unified_attention(
                 USE_SOFTCAP=(softcap > 0),
                 USE_SINKS=(sinks is not None),
                 SLIDING_WINDOW=(1 + window_size[0]),
+                global_lens_ptr=(global_lens if global_lens is not None else seqused_k),
+                USE_GSW=(global_lens is not None),
                 stride_k_cache_0=k.stride(0),
                 stride_k_cache_1=k.stride(1),
                 stride_k_cache_2=k.stride(2),
