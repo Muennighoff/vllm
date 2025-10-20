@@ -142,6 +142,7 @@ class FlashAttentionMetadata:
 
     causal: bool = True
 
+    prompt_lens: Optional[torch.Tensor] = None
 
 def _get_sliding_window_configs(
         vllm_config: VllmConfig) -> set[Optional[tuple[int, int]]]:
@@ -360,7 +361,8 @@ class FlashAttentionMetadataBuilder(
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
-            causal=causal)
+            causal=causal,
+            prompt_lens=common_attn_metadata.prompt_lens)
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -428,6 +430,11 @@ class FlashAttentionImpl(AttentionImpl):
         self.prompt_keys = None
         self.prompt_values = None
         self.rope = rope
+
+        self.use_swf = os.environ.get("SWF")
+        if self.use_swf:
+            assert int(os.environ.get("SWF")) == sliding_window
+
 
     def forward(
         self,
@@ -613,6 +620,32 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=layer._v_scale.expand(descale_shape),
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
+                )
+            elif os.environ.get("SWF"):
+                logger.info_once("using SWF")
+                flash_attn_varlen_func(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=attn_metadata.max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=attn_metadata.causal,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=attn_metadata.block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=attn_metadata.scheduler_metadata,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    num_splits=attn_metadata.max_num_splits,
+                    s_aux=self.sinks,
+                    global_lens=attn_metadata.prompt_lens[:cu_seqlens_q.shape[0]-1] if self.use_swf else None,
                 )
             else:
                 flash_attn_varlen_func(
