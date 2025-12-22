@@ -275,9 +275,16 @@ class SingleTypeKVCacheManager(ABC):
         num_skipped_blocks = num_skipped_tokens // self.block_size
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
+        # Do not remove pinned prefix blocks [0, _pinned_blocks)
+        if hasattr(self, "pinned_blocks_env"):
+            pinned_blocks = self.pinned_blocks_by_req.get(request_id, self.pinned_blocks_env)
+        else:
+            pinned_blocks = 0
+        # Clamp scan range to valid block indices
         # Because the block starts from index 0, the num_skipped_block-th block
         # corresponds to index num_skipped_blocks - 1.
-        for i in range(num_skipped_blocks - 1, -1, -1):
+        for i in range(num_skipped_blocks - 1, pinned_blocks - 1, -1):
+        # for i in range(num_skipped_blocks - 1, -1, -1):
             if blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
@@ -369,6 +376,24 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
         self._null_block = block_pool.null_block
+
+        # This prevents early prompt blocks from being freed when using SW.
+        self.pinned_prompt_toks = 0
+        # Convert pinned tokens to pinned full blocks (ceil division)
+        self.pinned_blocks_env = cdiv(self.pinned_prompt_toks, self.block_size)
+        # Per-request pinned blocks (computed from actual prompt lengths)
+        self.pinned_blocks_by_req: dict[str, int] = {}
+
+    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+        # Initialize per-request pinned blocks based on actual prompt length.
+        if request.request_id not in self.pinned_blocks_by_req:
+            # Pin all prompt blocks including a partial tail (ceil),
+            # masking will ensure only exact prompt tokens are treated as global.
+            pinned_from_prompt = cdiv(request.num_prompt_tokens, self.block_size)
+            # Respect any env minimum if present
+            pinned = max(self.pinned_blocks_env, pinned_from_prompt)
+            self.pinned_blocks_by_req[request.request_id] = pinned
+        return super().cache_blocks(request, num_tokens)
 
     @classmethod
     def find_longest_cache_hit(

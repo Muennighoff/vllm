@@ -12,6 +12,7 @@ from typing import (
     ClassVar,
     Generic,
     Literal,
+    Optional,
     Protocol,
     TypeVar,
     get_args,
@@ -83,6 +84,8 @@ class CommonAttentionMetadata:
     slot_mapping: torch.Tensor
 
     causal: bool = True
+
+    prompt_lens: Optional[torch.Tensor] = None
 
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: torch.Tensor | None = None
