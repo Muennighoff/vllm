@@ -494,6 +494,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
+            prompt_lens=common_attn_metadata.prompt_lens,
         )
         return attn_metadata
 
