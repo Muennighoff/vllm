@@ -5,7 +5,7 @@
 import copy
 import os
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 import numpy as np
 import torch
@@ -215,6 +215,7 @@ class FlashAttentionMetadata:
 
     causal: bool = True
 
+    prompt_lens: Optional[torch.Tensor] = None
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
