@@ -1602,7 +1602,7 @@ class GPUModelRunner(
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
-            prompt_lens=torch.tensor(self.input_batch.num_prompt_tokens, device=self.device, dtype=torch.int64),
+            prompt_lens=torch.tensor(self.input_batch.num_prompt_tokens, device=self.device, dtype=torch.int32),
         )
 
         if self.dcp_world_size > 1:
